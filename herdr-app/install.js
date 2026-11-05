@@ -18,6 +18,8 @@ const path = require("node:path");
 const MOD = "mcc-usage";
 const BLOCK = { id: MOD, type: "block", content: { mod: MOD }, size: { px: 120 } };
 const SOURCE = path.join(__dirname, MOD);
+// Files the app writes into every mod folder; never copied from here.
+const APP_WRITTEN = new Set(["gpui-kit.d.ts", "jsconfig.json"]);
 
 const appHome = (env = process.env) => env.HERDR_APP_HOME || path.join(os.homedir(), ".config", "herdr-app");
 
@@ -127,7 +129,10 @@ function main(args = process.argv.slice(2)) {
   // The mod first, so the layout never names a mod that isn't there yet. Files the
   // app writes into the folder (jsconfig.json, gpui-kit.d.ts) stay.
   fs.mkdirSync(dest, { recursive: true });
-  for (const f of fs.readdirSync(SOURCE)) fs.copyFileSync(path.join(SOURCE, f), path.join(dest, f));
+  for (const f of fs.readdirSync(SOURCE)) {
+    if (APP_WRITTEN.has(f) || f.startsWith(".")) continue;
+    fs.copyFileSync(path.join(SOURCE, f), path.join(dest, f));
+  }
   console.log(`Copied the mod to ${dest}`);
 
   try {
