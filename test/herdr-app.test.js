@@ -56,6 +56,20 @@ test("notices say why an account can't be read and what to run", async () => {
   ]);
 });
 
+test("hasProblem flags failed refreshes, unreadable accounts and ending logins", async () => {
+  const { parse, hasProblem } = await usage();
+  const [fine, bad, soon, live] = parse(doc([
+    profile("default", ok(1, 2)),
+    profile("cs", { status: "error", reason: "token_expired" }),
+    profile("soon", ok(1, 2), { login_warning: true }),
+    profile("live", ok(1, 2)),
+  ]));
+  assert.equal(hasProblem(fine, undefined), false);
+  assert.equal(hasProblem(bad, undefined), true);
+  assert.equal(hasProblem(soon, undefined), true);
+  assert.equal(hasProblem(live, "rate_limited"), true);
+});
+
 test("details and the updated label", async () => {
   const { parse, details, updatedLabel } = await usage();
   const [p] = parse(doc([profile("default", ok(96, 24))]));

@@ -10,7 +10,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, home, theme, run, layout, props, nextCommand } from "herdr";
-import { parse, firstError, notices, details, updatedLabel, blockHeight, level, isStale, unreadable } from "./usage.js";
+import { parse, firstError, notices, details, updatedLabel, blockHeight, level, isStale, unreadable, hasProblem } from "./usage.js";
 
 const POLL = 30000;
 // The sidebar's rail (collapsed to icons) is narrower than this.
@@ -33,7 +33,8 @@ export default class Usage extends View {
     this.block = props()?.block ?? "mcc-usage";
     this.profiles = [];
     this.issues = {};      // name → reason the last live refresh gave
-    this.error = null;
+    this.error = null;     // why the last cache reread failed
+    this.refreshError = null; // why the last live refresh failed; kept until one succeeds
     this.loaded = false;
     this.hidden = localStorage.getItem("hidden") === "1";
     this.bin = null;
@@ -100,10 +101,11 @@ export default class Usage extends View {
           this.issues = {};
           for (const p of live) if (p.status !== "ok") this.issues[p.name] = p.reason;
           this.lastLive = Date.now();
-          this.error = null;
-        } catch (e) { this.error = firstError(r.stderr) || e.message; }
-      } catch (e) { this.error = e.message ?? String(e); }
+          this.refreshError = null;
+        } catch (e) { this.refreshError = firstError(r.stderr) || e.message; }
+      } catch (e) { this.refreshError = e.message ?? String(e); }
       this.refreshing = false;
+      this.fit();
       cx.notify();
       this.load(cx);
     });
@@ -117,9 +119,10 @@ export default class Usage extends View {
     cx.notify();
   }
 
-  // The notice lines: an error first, then each account's.
+  // The notice lines: the errors first, then each account's.
   lines() {
     const out = notices(this.profiles, this.issues);
+    if (this.refreshError && this.refreshError !== this.error) out.unshift({ name: null, text: `Refresh failed: ${this.refreshError}`, error: true });
     if (this.error) out.unshift({ name: null, text: this.error, error: true });
     return out;
   }
@@ -171,7 +174,7 @@ export default class Usage extends View {
 
   row(t, p, now) {
     const issue = this.issues[p.name];
-    const warn = Boolean(issue) || p.status !== "ok" || p.loginWarning;
+    const warn = hasProblem(p, issue);
     const stale = isStale(p, now);
     return h_flex().id(`mu-${p.name}`).h(24).px(8).flex_none().gap(6).items_center().rounded(6)
       .hover((s) => s.bg(t.hover)).tooltip(details(p, issue, now))
@@ -181,12 +184,15 @@ export default class Usage extends View {
       .when(!unreadable(p), (el) => el.child(this.meter(t, p.five, stale)).child(this.meter(t, p.week, stale)));
   }
 
-  // The rail: one 5-hour percent per account, the rest in the tooltip.
+  // The rail: one 5-hour percent per account, the rest in the tooltip. Like the
+  // full rows, stale numbers show dim and an account with a problem gets a ⚠.
   railRow(t, p, now) {
-    const w = p.five;
-    return div().id(`mu-${p.name}`).h(24).flex_none().flex().items_center().justify_center().text_size(11.5)
-      .text_color(w ? this.tone(t, Math.round(w.percent)) : t.dim).tooltip(details(p, this.issues[p.name], now))
-      .child(w ? `${Math.round(w.percent)}%` : "—");
+    const w = p.five, issue = this.issues[p.name];
+    const color = !w || isStale(p, now) ? t.dim : this.tone(t, Math.round(w.percent));
+    return h_flex().id(`mu-${p.name}`).h(24).flex_none().gap(2).items_center().justify_center().text_size(11.5)
+      .tooltip(details(p, issue, now))
+      .when(hasProblem(p, issue), (el) => el.child(div().text_color(t.ansi3).child("⚠")))
+      .child(div().text_color(color).child(w ? `${Math.round(w.percent)}%` : "—"));
   }
 
   render(cx) {

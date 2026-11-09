@@ -66,6 +66,9 @@ export const isStale = (p, now = Date.now()) => Boolean(p.updatedAt) && now - Da
 // The account can't be read at all: no numbers to show, only why.
 export const unreadable = (p) => p.status !== "ok" && !p.five && !p.week;
 
+// The account gets a ⚠: the last live refresh failed for it, it can't be read, or its login ends soon.
+export const hasProblem = (p, issue) => Boolean(issue) || p.status !== "ok" || Boolean(p.loginWarning);
+
 // Lines under the rows: why an account couldn't be read, and what to run.
 // `issues` holds the reasons the last live refresh gave, by account name.
 export function notices(profiles, issues = {}, now = Date.now()) {
