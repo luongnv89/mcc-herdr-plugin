@@ -138,16 +138,17 @@ export default class Usage extends View {
   button(t, id, icon, tip, action) {
     return div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
       .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .tooltip(tip).on_click(action).child(svg(ICON(icon)).size(14));
+      .role("button").accessibility_label(tip).tooltip(tip).on_click(action).child(svg(ICON(icon)).size(14));
   }
 
   header(t) {
     return h_flex().px(16).h(41).pt(14).pb(5).flex_none().gap(2).items_center()
       .child(div().id("mu-title").flex_1().min_w(0).truncate().text_size(11.5).font_medium().text_color(t.dim)
         .cursor_pointer().hover((s) => s.text_color(t.foreground))
+        .role("button").accessibility_label(this.hidden ? "Show usage" : "Hide usage")
         .on_click((_e, cx) => this.toggle(cx)).child("Usage"))
       .when(!this.hidden, (el) => el.child(this.refreshing
-        ? div().size(22).flex_none().flex().items_center().justify_center()
+        ? div().size(22).flex_none().flex().items_center().justify_center().accessibility_label("Refreshing usage")
           .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900))
         : this.button(t, "mu-refresh", "refresh", "Look every account up live (mcc usage --all)", (_e, cx) => this.refresh(cx))))
       .child(this.button(t, "mu-eye", this.hidden ? "eye-off" : "eye", this.hidden ? "Show usage" : "Hide usage", (_e, cx) => this.toggle(cx)));
