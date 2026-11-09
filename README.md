@@ -115,9 +115,11 @@ own version: a **Usage** section in the left sidebar, right under **Agents**.
   Between clicks it rereads mcc's cache every 30 seconds while it shows.
 - Hover a row for each window's percent, when it resets and how old the numbers
   are. Green under 80%, yellow from 80%, red from 95%; numbers more than an hour old
-  show grey. A name in yellow with ⚠ has a problem, and a line under the rows says
-  which `mcc login` fixes it.
-- With the sidebar collapsed to its rail, it shows each account's 5-hour percent.
+  show faded, with their age (◷ 3h) beside the name. A name in yellow with ⚠ has a
+  problem, and a line under the rows says which `mcc login` fixes it. A failed ↻
+  says why in a line of its own.
+- With the sidebar collapsed to its rail, it shows each account's 5-hour percent
+  (faded when stale, ⚠ for a problem) under a 👁 button that shows or hides them.
 
 ### Install
 

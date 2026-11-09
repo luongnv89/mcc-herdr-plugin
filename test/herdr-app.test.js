@@ -86,6 +86,22 @@ test("block height: the header alone when hidden, else every line", async () => 
   assert.equal(blockHeight({ hidden: false, rows: 0, notices: 1 }), SIZES.header + SIZES.labels + SIZES.row + SIZES.notice + SIZES.bottom);
 });
 
+test("block height on the rail: the eye button, then one line per account, no header or notices", async () => {
+  const { blockHeight, SIZES } = await usage();
+  const button = 2 * SIZES.railPad + SIZES.row;
+  assert.equal(blockHeight({ rail: true, hidden: true, rows: 6, notices: 2 }), button);
+  assert.equal(blockHeight({ rail: true, hidden: false, rows: 3, notices: 2 }), button + 3 * SIZES.row);
+  assert.equal(blockHeight({ rail: true, hidden: false, rows: 0 }), button);
+});
+
+test("staleAge says how old stale numbers are, and nothing for fresh ones", async () => {
+  const { staleAge } = await usage();
+  assert.equal(staleAge({ updatedAt: "2026-11-05T21:30:00Z" }, NOW), "");
+  assert.equal(staleAge({ updatedAt: null }, NOW), "");
+  assert.equal(staleAge({ updatedAt: "2026-11-05T18:50:00Z" }, NOW), "3h");
+  assert.equal(staleAge({ updatedAt: "2026-11-03T21:00:00Z" }, NOW), "2d");
+});
+
 // The shape of Herdr's main layout (and clones of it): spaces and agents share
 // sidebar-lists, between the brand bar and the footer.
 const mainLike = () => ({

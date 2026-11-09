@@ -1,7 +1,8 @@
 // What the sidebar section knows about mcc, with no Herdr or GPUI in it, so the
 // tests can load it in plain Node. Ported from the Herdr TUI plugin's panel.js.
 
-// A row whose numbers are older than this says how old they are.
+// Numbers older than this are stale: their row shows them faded, with their age
+// (staleAge) beside the name.
 export const STALE = 3600000;
 
 const clean = (text) => String(text ?? "").replace(/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\ufeff]+/g, " ").trim();
@@ -63,6 +64,13 @@ export const level = (pct) => (pct >= 95 ? "high" : pct >= 80 ? "warn" : "ok");
 
 export const isStale = (p, now = Date.now()) => Boolean(p.updatedAt) && now - Date.parse(p.updatedAt) > STALE;
 
+// How old stale numbers are, short: 3h, 2d. Empty when they aren't stale.
+export function staleAge(p, now = Date.now()) {
+  if (!isStale(p, now)) return "";
+  const h = Math.floor((now - Date.parse(p.updatedAt)) / 3600000);
+  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
+}
+
 // The account can't be read at all: no numbers to show, only why.
 export const unreadable = (p) => p.status !== "ok" && !p.five && !p.week;
 
@@ -108,9 +116,11 @@ export function updatedLabel(profiles, lastLive, now = Date.now()) {
 
 // The block's height in px (at zoom 1). The section draws a header, then, when its
 // values show, a column-label line, one line per account (or one for loading / empty),
-// the notice lines and some room at the bottom.
-export const SIZES = { header: 41, labels: 20, row: 24, notice: 18, bottom: 10 };
-export function blockHeight({ hidden, rows, notices: lines = 0 }) {
+// the notice lines and some room at the bottom. On the rail it draws only the eye
+// button and, when its values show, one line per account, with railPad above and below.
+export const SIZES = { header: 41, labels: 20, row: 24, notice: 18, bottom: 10, railPad: 8 };
+export function blockHeight({ hidden, rows, notices: lines = 0, rail = false }) {
+  if (rail) return 2 * SIZES.railPad + SIZES.row + (hidden ? 0 : rows * SIZES.row);
   if (hidden) return SIZES.header;
   return SIZES.header + SIZES.labels + Math.max(1, rows) * SIZES.row + lines * SIZES.notice + SIZES.bottom;
 }

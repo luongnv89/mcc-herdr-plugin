@@ -10,14 +10,17 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, home, theme, run, layout, props, nextCommand } from "herdr";
-import { parse, firstError, notices, details, updatedLabel, blockHeight, level, isStale, unreadable, hasProblem } from "./usage.js";
+import { parse, firstError, notices, details, updatedLabel, blockHeight, level, isStale, staleAge, unreadable, hasProblem } from "./usage.js";
 
 const POLL = 30000;
-// The sidebar's rail (collapsed to icons) is narrower than this.
-const RAIL = 150;
+// The sidebar's rail (collapsed to icons) is narrower than this, as the built-in
+// sections (agents, workspace-chrome) have it.
+const RAIL = 160;
 const ICON = (name) => `mods/mcc-usage/${name}.svg`;
 // Meter widths, px: bar, gap, percent.
 const BAR = 22, PCT = 30, METER = BAR + 5 + PCT;
+// Stale numbers keep their threshold colour, faded to this.
+const FADED = 0.45;
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -127,9 +130,15 @@ export default class Usage extends View {
     return out;
   }
 
+  // On the rail? Goes by the sidebar's width like the built-in sections, so they all
+  // switch together; in a layout with no sidebar, by this block's own width.
+  narrow() {
+    return (find(layout(), "sidebar")?.size?.px ?? this.width ?? Infinity) < RAIL;
+  }
+
   // Fit the block to what it shows. Never from render(): a resize re-renders.
   fit() {
-    const want = blockHeight({ hidden: this.hidden, rows: this.profiles.length, notices: this.lines().length });
+    const want = blockHeight({ hidden: this.hidden, rows: this.profiles.length, notices: this.lines().length, rail: this.narrow() });
     const node = find(layout(), this.block);
     if (!node || node.size?.px === want) return;
     run("layout.resize", { id: this.block, px: want });
@@ -141,6 +150,10 @@ export default class Usage extends View {
       .role("button").accessibility_label(tip).tooltip(tip).on_click(action).child(svg(ICON(icon)).size(14));
   }
 
+  eye(t) {
+    return this.button(t, "mu-eye", this.hidden ? "eye-off" : "eye", this.hidden ? "Show usage" : "Hide usage", (_e, cx) => this.toggle(cx));
+  }
+
   header(t) {
     return h_flex().px(16).h(41).pt(14).pb(5).flex_none().gap(2).items_center()
       .child(div().id("mu-title").flex_1().min_w(0).truncate().text_size(11.5).font_medium().text_color(t.dim)
@@ -148,10 +161,10 @@ export default class Usage extends View {
         .role("button").accessibility_label(this.hidden ? "Show usage" : "Hide usage")
         .on_click((_e, cx) => this.toggle(cx)).child("Usage"))
       .when(!this.hidden, (el) => el.child(this.refreshing
-        ? div().size(22).flex_none().flex().items_center().justify_center().accessibility_label("Refreshing usage")
+        ? div().size(22).flex_none().flex().items_center().justify_center().role("progress_indicator").accessibility_label("Refreshing usage")
           .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900))
         : this.button(t, "mu-refresh", "refresh", "Look every account up live (mcc usage --all)", (_e, cx) => this.refresh(cx))))
-      .child(this.button(t, "mu-eye", this.hidden ? "eye-off" : "eye", this.hidden ? "Show usage" : "Hide usage", (_e, cx) => this.toggle(cx)));
+      .child(this.eye(t));
   }
 
   tone(t, pct) {
@@ -159,16 +172,16 @@ export default class Usage extends View {
     return l === "high" ? t.ansi1 : l === "warn" ? t.ansi3 : t.ansi2;
   }
 
-  // A small bar and the percent. Stale numbers show dim.
+  // A small bar and the percent. Stale numbers show faded.
   meter(t, w, stale) {
     if (!w) {
       return h_flex().w(METER).flex_none().gap(5).items_center()
         .child(div().w(BAR).h(4).rounded(2).bg(t.border))
         .child(div().w(PCT).text_right().text_size(11.5).text_color(t.dim).child("—"));
     }
-    const pct = Math.round(w.percent), color = stale ? t.dim : this.tone(t, pct);
+    const pct = Math.round(w.percent), color = this.tone(t, pct);
     const fill = Math.max(0, Math.min(BAR, Math.round((pct / 100) * BAR)));
-    return h_flex().w(METER).flex_none().gap(5).items_center()
+    return h_flex().w(METER).flex_none().gap(5).items_center().when(stale, (el) => el.opacity(FADED))
       .child(div().w(BAR).h(4).rounded(2).bg(t.border).overflow_hidden().child(div().w(fill).h(4).bg(color)))
       .child(div().w(PCT).text_right().text_size(11.5).text_color(color).child(`${pct}%`));
   }
@@ -176,11 +189,14 @@ export default class Usage extends View {
   row(t, p, now) {
     const issue = this.issues[p.name];
     const warn = hasProblem(p, issue);
-    const stale = isStale(p, now);
+    const stale = isStale(p, now), age = staleAge(p, now);
     return h_flex().id(`mu-${p.name}`).h(24).px(8).flex_none().gap(6).items_center().rounded(6)
       .hover((s) => s.bg(t.hover)).tooltip(details(p, issue, now))
-      .child(div().flex_1().min_w(0).truncate().text_color(warn ? t.ansi3 : p.isDefault ? t.foreground : t.muted)
-        .child(warn ? `${p.name} ⚠` : p.name))
+      .child(div().flex_1().min_w(0).truncate().text_color(warn ? t.ansi3 : p.isDefault ? t.foreground : t.muted).child(p.name))
+      .when(warn, (el) => el.child(div().flex_none().text_color(t.ansi3).child("⚠")))
+      // Stale numbers say how old they are, not only by fading.
+      .when(Boolean(age), (el) => el.child(h_flex().flex_none().gap(2).items_center().text_size(10.5).text_color(t.dim)
+        .child(svg("mods/workspace-chrome/clock.svg").size(10)).child(age)))
       .when(unreadable(p), (el) => el.child(div().w(METER * 2 + 6).flex_none().text_right().text_size(11).text_color(t.dim).truncate().child("unavailable")))
       .when(!unreadable(p), (el) => el.child(this.meter(t, p.five, stale)).child(this.meter(t, p.week, stale)));
   }
@@ -189,23 +205,32 @@ export default class Usage extends View {
   // full rows, stale numbers show dim and an account with a problem gets a ⚠.
   railRow(t, p, now) {
     const w = p.five, issue = this.issues[p.name];
-    const color = !w || isStale(p, now) ? t.dim : this.tone(t, Math.round(w.percent));
     return h_flex().id(`mu-${p.name}`).h(24).flex_none().gap(2).items_center().justify_center().text_size(11.5)
       .tooltip(details(p, issue, now))
       .when(hasProblem(p, issue), (el) => el.child(div().text_color(t.ansi3).child("⚠")))
-      .child(div().text_color(color).child(w ? `${Math.round(w.percent)}%` : "—"));
+      .child(div().text_color(w ? this.tone(t, Math.round(w.percent)) : t.dim).when(Boolean(w) && isStale(p, now), (el) => el.opacity(FADED))
+        .child(w ? `${Math.round(w.percent)}%` : "—"));
   }
 
   render(cx) {
     const t = theme(), now = Date.now();
-    const rail = (this.width ?? Infinity) < RAIL;
+    const rail = this.narrow();
+    // Crossing the rail width changes what the section draws, so refit then (here,
+    // not in render()).
     const root = v_flex().id("mcc-usage").size_full().min_h(0).bg(t.chrome).border_t(1).border_color(t.border)
       .text_size(12.5).text_color(t.foreground)
-      .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } });
+      .on_size_change((size, cx) => {
+        if (size.width === this.width) return;
+        this.width = size.width;
+        const r = this.narrow();
+        if (r !== this.rail) { this.rail = r; this.fit(); }
+        cx.notify();
+      });
 
     if (rail) {
-      return root.pt(8).when(!this.hidden, (el) => el.child(v_flex().id("mu-rail").flex_1().min_h(0).overflow_y_scrollbar()
-        .children(this.profiles.map((p) => this.railRow(t, p, now)))));
+      return root.pt(8).child(h_flex().h(24).flex_none().items_center().justify_center().child(this.eye(t)))
+        .when(!this.hidden, (el) => el.child(v_flex().id("mu-rail").flex_1().min_h(0).overflow_y_scrollbar()
+          .children(this.profiles.map((p) => this.railRow(t, p, now)))));
     }
 
     const placeholder = !this.loaded ? "Loading…" : !this.profiles.length && !this.error ? "No mcc profiles" : null;
