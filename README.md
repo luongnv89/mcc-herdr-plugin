@@ -149,7 +149,9 @@ herdr-app do layout.clone '{"name":"main","as":"my-layout"}'
 ```
 
 `--layout NAME` picks another of your layouts. To update, pull and run it again. To
-remove it, run `node herdr-app/install.js --uninstall`.
+remove it, run `node herdr-app/install.js --uninstall`: it takes the block out of
+every layout of yours that has it (saving each as `<layout>.json.bak-mcc-usage`
+first), then deletes the mod.
 
 ### Keys
 

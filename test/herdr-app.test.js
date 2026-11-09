@@ -6,7 +6,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { addBlock, removeBlock, pathTo, agentsId } = require("../herdr-app/install.js");
+const os = require("node:os");
+const { main, addBlock, removeBlock, pathTo, agentsId, isShipped } = require("../herdr-app/install.js");
 
 const usage = () => import("data:text/javascript;base64," +
   fs.readFileSync(path.join(__dirname, "..", "herdr-app", "mcc-usage", "usage.js")).toString("base64"));
@@ -140,4 +141,58 @@ test("removeBlock takes the section out again", () => {
   assert.equal(back.changed, true);
   assert.deepEqual(back.layout, mainLike());
   assert.equal(removeBlock(mainLike()).changed, false);
+});
+
+// A throwaway HERDR_APP_HOME: never the real ~/.config/herdr-app. "mine" is the
+// layout shown, "other" another of yours, "main" one of Herdr's own.
+function appHomeFixture(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "mcc-herdr-app-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, "layouts"));
+  for (const name of ["mine", "other", "main"]) fs.writeFileSync(path.join(home, "layouts", `${name}.json`), JSON.stringify(mainLike()));
+  fs.writeFileSync(path.join(home, "shared.json"), JSON.stringify({ layout: "mine" }));
+  fs.writeFileSync(path.join(home, "installed.json"), JSON.stringify({ "layout:main": "1", "layout:fancy": "1" }));
+  t.mock.method(console, "log", () => {});
+  const env = { HERDR_APP_HOME: home, HERDR_APP_BIN: path.join(home, "no-such-herdr-app") };
+  const layout = (name) => JSON.parse(fs.readFileSync(path.join(home, "layouts", `${name}.json`), "utf8"));
+  return { home, env, layout, mod: path.join(home, "mods", "mcc-usage") };
+}
+
+test("isShipped: Herdr's own layouts, by installed.json or by name", (t) => {
+  const { home } = appHomeFixture(t);
+  assert.equal(isShipped(home, "fancy"), true);
+  assert.equal(isShipped(home, "main"), true);
+  assert.equal(isShipped(home, "win98"), true, "known even without installed.json listing it");
+  assert.equal(isShipped(home, "mine"), false);
+});
+
+test("main installs into the shown layout: copies the mod, backs the layout up, adds the block", (t) => {
+  const { home, env, layout, mod } = appHomeFixture(t);
+  main([], env);
+  for (const f of ["main.js", "usage.js", "mod.json"]) assert.ok(fs.existsSync(path.join(mod, f)), f);
+  assert.ok(!fs.existsSync(path.join(mod, "jsconfig.json")), "files the app writes aren't copied");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "layouts", "mine.json.bak-mcc-usage"), "utf8")), mainLike());
+  assert.ok(pathTo(layout("mine"), "mcc-usage"));
+  assert.equal(pathTo(layout("other"), "mcc-usage"), null, "only the shown layout");
+});
+
+test("main refuses one of Herdr's own layouts before writing anything", (t) => {
+  const { home, env, layout, mod } = appHomeFixture(t);
+  assert.throws(() => main(["--layout", "main"], env), /one of Herdr's own layouts/);
+  assert.ok(!fs.existsSync(mod));
+  assert.ok(!fs.existsSync(path.join(home, "layouts", "main.json.bak-mcc-usage")));
+  assert.deepEqual(layout("main"), mainLike());
+});
+
+test("main --uninstall takes the block out of every layout of yours, then the mod", (t) => {
+  const { home, env, layout, mod } = appHomeFixture(t);
+  main([], env);
+  main(["--layout", "other"], env);
+  assert.ok(pathTo(layout("other"), "mcc-usage"));
+  main(["--uninstall"], env);
+  assert.deepEqual(layout("mine"), mainLike());
+  assert.deepEqual(layout("other"), mainLike());
+  assert.deepEqual(layout("main"), mainLike());
+  assert.ok(pathTo(JSON.parse(fs.readFileSync(path.join(home, "layouts", "other.json.bak-mcc-usage"), "utf8")), "mcc-usage"), "backed up before the edit");
+  assert.ok(!fs.existsSync(mod));
 });

@@ -5,7 +5,7 @@
 //
 //   node herdr-app/install.js                 the layout Herdr shows now
 //   node herdr-app/install.js --layout NAME   another of your layouts
-//   node herdr-app/install.js --uninstall     take the block and the mod out again
+//   node herdr-app/install.js --uninstall     take the block out of every layout of yours, then the mod
 //
 // Herdr's own layouts (main, terminals, win98) are replaced on every start, so it
 // only edits layouts that are yours: clone one first (Duplicate layout).
@@ -95,30 +95,46 @@ function argValue(args, flag) {
   return i >= 0 ? args[i + 1] : null;
 }
 
-function herdrApp(args) {
-  return execFileSync(process.env.HERDR_APP_BIN || "herdr-app", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+function herdrApp(args, env = process.env) {
+  return execFileSync(env.HERDR_APP_BIN || "herdr-app", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
-function main(args = process.argv.slice(2)) {
-  const home = appHome();
+const backupOf = (file) => `${file}.bak-${MOD}`;
+
+// Takes the block out of every layout of yours (any of them may have it: installed
+// with --layout, or cloned after the install), then the mod, so no layout is left
+// naming a mod that isn't there. Herdr's own layouts are skipped: the installer
+// never adds the block to them.
+function uninstall(home, dest) {
+  const dir = path.join(home, "layouts");
+  const names = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort() : [];
+  let took = 0;
+  for (const name of names) {
+    if (isShipped(home, name)) continue;
+    const file = path.join(dir, `${name}.json`);
+    let root;
+    try { root = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { console.log(`Skipped ${file}: ${e.message}`); continue; }
+    const { layout, changed } = removeBlock(root);
+    if (!changed) continue;
+    fs.copyFileSync(file, backupOf(file));
+    fs.writeFileSync(file, JSON.stringify(layout, null, 2) + "\n");
+    console.log(`Took the ${MOD} block out of ${name} (backup: ${path.basename(backupOf(file))})`);
+    took++;
+  }
+  if (!took) console.log(`No layout of yours has the ${MOD} block`);
+  if (fs.existsSync(dest)) { fs.rmSync(dest, { recursive: true, force: true }); console.log(`Removed ${dest}`); }
+}
+
+function main(args = process.argv.slice(2), env = process.env) {
+  const home = appHome(env);
   if (!fs.existsSync(home)) throw new Error(`${home} doesn't exist: open the Herdr app once first`);
+  const dest = path.join(home, "mods", MOD);
+  if (args.includes("--uninstall")) return uninstall(home, dest);
+
   const name = argValue(args, "--layout") || readJson(path.join(home, "shared.json"), {}).layout || "main";
   const file = path.join(home, "layouts", `${name}.json`);
-  const dest = path.join(home, "mods", MOD);
-  const uninstall = args.includes("--uninstall");
-
   if (!fs.existsSync(file)) throw new Error(`no layout ${file}`);
   const root = JSON.parse(fs.readFileSync(file, "utf8"));
-
-  if (uninstall) {
-    const { layout, changed } = removeBlock(root);
-    if (changed) {
-      fs.writeFileSync(file, JSON.stringify(layout, null, 2) + "\n");
-      console.log(`Took the ${MOD} block out of ${file}`);
-    } else console.log(`${file} has no ${MOD} block`);
-    if (fs.existsSync(dest)) { fs.rmSync(dest, { recursive: true, force: true }); console.log(`Removed ${dest}`); }
-    return;
-  }
 
   const { layout, changed, where } = addBlock(root);
   if (changed && isShipped(home, name)) {
@@ -136,7 +152,7 @@ function main(args = process.argv.slice(2)) {
   console.log(`Copied the mod to ${dest}`);
 
   try {
-    const out = herdrApp(["check", dest]).trim();
+    const out = herdrApp(["check", dest], env).trim();
     if (out) console.log(out);
   } catch (e) {
     if (e.code === "ENOENT") console.log("herdr-app isn't on your PATH: skipped `herdr-app check`");
@@ -144,7 +160,7 @@ function main(args = process.argv.slice(2)) {
   }
 
   if (changed) {
-    const backup = `${file}.bak-${MOD}`;
+    const backup = backupOf(file);
     fs.copyFileSync(file, backup);
     fs.writeFileSync(file, JSON.stringify(layout, null, 2) + "\n");
     console.log(`Added the section to ${name} ${where} (backup: ${path.basename(backup)})`);
@@ -153,4 +169,4 @@ function main(args = process.argv.slice(2)) {
 
 if (require.main === module) {
   try { main(); } catch (e) { console.error(e.message); process.exit(1); }
-} else module.exports = { addBlock, removeBlock, pathTo, agentsId, isShipped, appHome, BLOCK };
+} else module.exports = { main, addBlock, removeBlock, pathTo, agentsId, isShipped, appHome, BLOCK };
