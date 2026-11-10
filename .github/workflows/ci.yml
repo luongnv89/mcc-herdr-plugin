@@ -20,7 +20,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Syntax
-        run: node --check panel.js && node --check toggle.js && node --check bind-key.js
+        run: |
+          node --check panel.js && node --check toggle.js && node --check bind-key.js && node --check herdr-app/install.js
+          node --input-type=module --check < herdr-app/mcc-usage/usage.js
+          node --input-type=module --check < herdr-app/mcc-usage/main.js
+          for f in herdr-app/mcc-usage/*.json; do node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"; done
       - name: Manifest
         run: |
           python3 - <<'PY'

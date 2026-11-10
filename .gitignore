@@ -1,2 +1,5 @@
 .DS_Store
 node_modules/
+# Written by Herdr app into mod folders (herdr-app check, hot reload)
+herdr-app/mcc-usage/gpui-kit.d.ts
+herdr-app/mcc-usage/jsconfig.json
