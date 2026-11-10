@@ -10,6 +10,7 @@
 // Herdr's own layouts (main, terminals, win98) are replaced on every start, so it
 // only edits layouts that are yours: clone one first (Duplicate layout).
 "use strict";
+const clone = structuredClone ?? ((o) => JSON.parse(JSON.stringify(o)));
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -56,7 +57,7 @@ function agentsId(root) {
 // column); elsewhere, right after the agents block in its column.
 // Returns { layout, changed, where } and never edits `root` in place.
 function addBlock(root, block = BLOCK) {
-  const layout = structuredClone(root);
+  const layout = clone(root);
   if (pathTo(layout, block.id)) return { layout, changed: false, where: "already there" };
   const id = agentsId(layout);
   if (!id) throw new Error("this layout has no agents list to put the section under");
@@ -66,13 +67,13 @@ function addBlock(root, block = BLOCK) {
   if (sidebarAt >= 0 && sidebarAt < trail.length - 1) { parent = trail[sidebarAt]; after = trail[sidebarAt + 1]; }
   else { parent = trail[trail.length - 2]; after = trail[trail.length - 1]; }
   if (!parent || parent.type !== "column") throw new Error(`the agents list isn't in a column (${parent?.type ?? "it's the root"}); add the block by hand`);
-  parent.children.splice(parent.children.indexOf(after) + 1, 0, structuredClone(block));
+  parent.children.splice(parent.children.indexOf(after) + 1, 0, clone(block));
   return { layout, changed: true, where: `under "${after.id}" in "${parent.id}"` };
 }
 
 // Takes every node with `id` out. Returns { layout, changed }.
 function removeBlock(root, id = MOD) {
-  const layout = structuredClone(root);
+  const layout = clone(root);
   let changed = false;
   const walk = (n) => {
     if (!Array.isArray(n?.children)) return;

@@ -80,6 +80,7 @@ export default class Usage extends View {
         try {
           this.profiles = parse(r.stdout);
           this.error = null;
+          this.refreshError = null;
         } catch (e) { this.error = firstError(r.stderr) || e.message; }
       } catch (e) { this.error = e.message ?? String(e); }
       this.loading = false;
