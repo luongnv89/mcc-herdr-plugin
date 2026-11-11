@@ -235,6 +235,18 @@ test("each sample updates the stats: CPU and network from the second one on", (t
   assert.deepEqual(p.ui.stats.net, { rx: 2048, tx: 0 }, "the network still updates");
 });
 
+test("collapse and expand start the CPU and network over from a new base", (t) => {
+  withUi(t, { stats: {}, cpuBase: null, netBase: null });
+  p.applyStats({ cpu: { total: 1000, idle: 850 }, mem: MEM, net: { rx: 0, tx: 0 }, at: 0 });
+  p.applyStats({ cpu: { total: 1900, idle: 1600 }, mem: MEM, net: { rx: 10240, tx: 0 }, at: 5000 });
+  assert.equal(Math.round(p.ui.stats.cpu), 17);
+  p.resetStats();
+  assert.deepEqual(p.ui.stats, {}, "— until the next sample");
+  // The first sample after the reset only sets the bases again.
+  p.applyStats({ cpu: { total: 2900, idle: 1700 }, mem: MEM, net: { rx: 20480, tx: 0 }, at: 60000 });
+  assert.deepEqual(p.ui.stats, { cpu: undefined, mem: MEM, net: undefined });
+});
+
 test("collapsed, the title line adds CPU and memory, and the network when there's room", (t) => {
   withUi(t, { collapsed: true, profiles: p.parse(DOC), stats: STATES.read });
   assert.match(strip(p.header(120)), /5h 12% · wk 96% · cpu 17% · mem 80% · net ↓1\.2M ↑40K/);

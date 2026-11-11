@@ -321,6 +321,13 @@ function applyStats(r) {
   ui.stats = { cpu: cpu.value, mem: r.mem, net: net.value };
 }
 
+// Start the stats over: the next sample sets new bases, so the first CPU percent and
+// rate after a collapse or expand cover only the time since.
+function resetStats() {
+  ui.stats = {};
+  ui.cpuBase = ui.netBase = null;
+}
+
 // Each metric that can't be read shows "unavailable" on its own; none of it touches
 // the usage rows or their errors, and the stats line never changes the pane's height.
 async function sampleStats() {
@@ -569,8 +576,10 @@ function toggleCollapsed() {
   ui.collapsed = !ui.collapsed;
   ui.top = 0;
   saveCollapsed();
+  resetStats();
   resize();
   draw();
+  sampleStats();
 }
 
 // ── Draw ────────────────────────────────────────────────────────────────────
@@ -720,5 +729,5 @@ if (require.main === module) main();
 else module.exports = {
   width, fit, clip, until, ago, flag, parse, firstError, columns, row, cell, cellWidthFor, peak, parentSplit, resizeStep, reasonText, findMcc, noticeLines, wantedRows, ui,
   parseProcStat, cpuPercent, parseMeminfo, parseVmStat, parseNetDev, parseNetstat, rate, step, formatBytes, formatRate, shortBytes, formatPair, memPercent, readout, label,
-  cpuTimes, readStats, applyStats, statsRow, header,
+  cpuTimes, readStats, applyStats, resetStats, statsRow, header,
 };
