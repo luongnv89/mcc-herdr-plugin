@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-11-11)
+
 - **Herdr app.** A Usage section for the Herdr desktop app's left sidebar, under Agents (`herdr-app/mcc-usage`): every mcc account's 5-hour and weekly usage as small bars, with an eye button that shows or hides the values (the section shrinks to its title line), a ↻ button for a live lookup, and tooltips with reset times. `node herdr-app/install.js` copies it and adds it to your layout; `--uninstall` takes it out. Key commands: `mcc-usage.toggle`, `.show`, `.hide`, `.refresh`.
 - **Machine stats.** Both the terminal panel and the app's Usage section show this machine's CPU and memory use and its network download/upload rate, updated every 5 seconds without any action (the usage numbers still reread every 30 seconds). Linux reads `/proc`; macOS reads `vm_stat`, `netstat` and `iostat` (memory as Activity Monitor's "Memory Used"). Only physical network interfaces count. A value that can't be read shows `unavailable` and the rest of the section still shows. Collapsed, the panel's title adds the CPU and memory percent; on the app's rail, C, M and N lines show them.
 

@@ -1,6 +1,6 @@
 id = "mcc-herdr-plugin"
 name = "mcc-herdr-plugin"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.5"
 description = "5-hour and weekly Claude Code usage of every mcc account, in a collapsible pane at the bottom-left of the tab."
 platforms = ["linux", "macos"]
