@@ -2,10 +2,11 @@
 
 A [Herdr](https://herdr.dev) plugin that shows the 5-hour and weekly Claude Code usage
 of every account [mcc](https://github.com/luongnv89/mcc) manages, in a small pane at the bottom-left of the
-tab, right under the sidebar's agent list.
+tab, right under the sidebar's agent list, with this machine's CPU, memory and network.
 
 ```
  ▾ mcc usage                                        updated 4m ago  ↻ refresh
+ cpu 12% · mem 27.0/32.0 GB · net ↓1.2 MB/s ↑40 KB/s
 ──────────────────────────────────────────────────────────────────────────────
  default    5h ██░░░░░░░░░░  14%   3h55    wk █░░░░░░░░░░░   7%   5d16h
  csdaisy    5h █░░░░░░░░░░░  12%   5m      wk ░░░░░░░░░░░░   2%   2d9h
@@ -22,6 +23,11 @@ Each row shows a bar, the percent used and the time until the window resets. As 
 whose last live lookup failed or whose login ends soon, with a line under the table
 naming the `mcc login` command that fixes it. When the numbers are more than an hour
 old, the row says how old they are.
+
+The line under the title shows this machine's CPU and memory use (green, yellow from
+80%, red from 95%) and how fast it's receiving (↓) and sending (↑) over the network.
+A value it can't read says `unavailable`; the usage rows still show. A narrow pane
+drops the network, then the memory totals.
 
 ## Install
 
@@ -72,7 +78,8 @@ plugin doesn't bind one. Without a key, run `herdr plugin action invoke mcc-herd
 Running the toggle action again in the same tab also closes the panel.
 
 **Collapse** shrinks the pane so the panes above get the space back. The title row
-then shows the highest 5-hour and weekly percent across accounts. Herdr keeps a split
+then shows the highest 5-hour and weekly percent across accounts, the CPU and memory
+percent, and the network when there's room. Herdr keeps a split
 at least a tenth of its height, so a collapsed pane still shows a few rows. Expanding
 fits the pane to its rows again, up to 60% of the split. The panel remembers whether
 it was collapsed.
@@ -82,7 +89,8 @@ that account's own login and saves the result to mcc's cache. It sends each
 account's OAuth token to Anthropic's undocumented, rate-limited usage endpoint, so it
 only runs when you ask for it. For the details, see `mcc usage --help`. Between
 refreshes, the panel rereads mcc's cache (`mcc usage --json-v2`, a local file read)
-every 30 seconds. That picks up whatever `mcc statusline` caches as you work.
+every 30 seconds. That picks up whatever `mcc statusline` caches as you work. The
+CPU, memory and network update by themselves every 5 seconds.
 
 ## Why a pane and not part of the sidebar
 
@@ -101,6 +109,7 @@ own version: a **Usage** section in the left sidebar, right under **Agents**.
  …
 ──────────────────────────────────────────
  Usage                               ↻  👁
+ CPU 12%  Mem 27.0/32.0 GB  Net ↓1.2 MB/s…
  updated 3m ago              5h      week
  default            ▬▬── 47%    ▬─── 24%
  csdaisy            ──── 0%     ▬─── 13%
@@ -118,8 +127,12 @@ own version: a **Usage** section in the left sidebar, right under **Agents**.
   show faded, with their age (◷ 3h) beside the name. A name in yellow with ⚠ has a
   problem, and a line under the rows says which `mcc login` fixes it. A failed ↻
   says why in a line of its own.
-- With the sidebar collapsed to its rail, it shows each account's 5-hour percent
-  (faded when stale, ⚠ for a problem) under a 👁 button that shows or hides them.
+- The line under the title is this machine's CPU, memory and network, updated
+  every 5 seconds while the values show; hover it for the detail. CPU and memory
+  take the same colours. One it can't read says `unavailable`, and the rest still show.
+- With the sidebar collapsed to its rail, it shows C, M and N lines for the CPU,
+  memory and download rate, then each account's 5-hour percent (faded when stale,
+  ⚠ for a problem), under a 👁 button that shows or hides them.
 
 ### Install
 
@@ -170,6 +183,14 @@ Herdr gives a mod's programs 30 seconds. If `mcc usage --all` takes longer (many
 accounts, a slow network), ↻ shows an error; the section still rereads the cache, so
 it shows whatever mcc saved in that time.
 
+The CPU, memory and network are of the machine Herdr runs on, also in a space on
+another machine. They come from `/proc` on Linux and `vm_stat`, `netstat` and `iostat`
+on macOS; elsewhere what it can't read shows as unavailable. On macOS, memory used is counted as
+Activity Monitor's "Memory Used" counts it (app memory, wired and compressed), so it
+comes close to that figure. The network counts physical interfaces only: loopback,
+bridges, VPN tunnels and container interfaces are left out so no byte counts twice.
+The terminal panel reads the same sources (CPU from Node's `os.cpus()`).
+
 ## Develop
 
 ```bash
@@ -189,12 +210,15 @@ panel opens.
 - `bind-key.js`: binds a key to `toggle` in Herdr's config.
 - `herdr-app/mcc-usage/`: the Herdr app mod. `main.js` draws the section,
   `usage.js` holds the parts with no Herdr in them (reading mcc's JSON, times,
-  notices, the block's height). After a change, run `node herdr-app/install.js`
+  notices, the block's height) and `system.js` reads the machine's CPU, memory and
+  network from what Linux and macOS print (`panel.js` has a copy of its parsers;
+  a test checks the two agree). After a change, run `node herdr-app/install.js`
   again: the app reloads the mod as soon as its files change.
 - `herdr-app/install.js`: copies the mod and adds its block to your layout.
 - `test/`: unit tests for reading mcc's JSON, the rows at every width, the pane's
-  height, how `bind-key` picks a key and edits the config, the app mod's helpers and
-  where the installer puts the block.
+  height, how `bind-key` picks a key and edits the config, the app mod's helpers,
+  the machine stats parsers (fixtures in `test/system-fixtures.js`) and where the
+  installer puts the block.
 
 ## License
 

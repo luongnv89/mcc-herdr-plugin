@@ -2,7 +2,8 @@
 // The 5-hour and weekly Claude Code usage of every account mcc manages, read from
 // `mcc usage --json-v2`. It sits at the bottom-left of the tab, under the sidebar's
 // agent list. Refresh looks every account up live (`mcc usage --all`); collapse
-// shrinks the pane so the panes above get the room back.
+// shrinks the pane so the panes above get the room back. A line under the title
+// shows this machine's CPU, memory and network, sampled every 5 seconds.
 "use strict";
 const { execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -22,6 +23,10 @@ const LIVE_TIMEOUT = 120000;
 const MAX_SHARE = 0.6;
 // A row whose numbers are older than this says how old they are.
 const STALE = 3600000;
+// The machine's stats change by the second, so they're sampled more often than usage,
+// and no command that reads them may run into the next sample.
+const STATS = 5000;
+const STATS_TIMEOUT = 4000;
 
 // ── Terminal ────────────────────────────────────────────────────────────────
 
@@ -124,6 +129,215 @@ const NEEDS_LOGIN = new Set(["not_logged_in", "token_expired", "unauthorized"]);
 const reasonText = (r) => REASONS[r] ?? (r ? String(r).replace(/_/g, " ") : "unavailable");
 const loginCommand = (p) => `mcc login ${p.isDefault ? "default" : p.name}`;
 
+// ── Machine ─────────────────────────────────────────────────────────────────
+// Ported from herdr-app/mcc-usage/system.js: keep the two copies the same (the
+// tests check they agree). A metric is a value, `undefined` before there is one
+// (a rate needs two samples), or `null` when it can't be read.
+
+// Interfaces that carry no traffic of their own (containers, VPNs, bridges), so
+// counting them would count the same bytes twice. Used when Linux can't say.
+const VIRTUAL = /^(lo$|docker|veth|br-|virbr|tun|tap|wg|tailscale|cni|flannel|cali|lxc|lxdbr|incusbr|podman|mpqemubr|vnet|vxlan)/;
+// The same on macOS: loopback, bridges, VPN tunnels, AirDrop/peer links and the like.
+const MAC_VIRTUAL = /^(lo|bridge|utun|awdl|llw|gif|stf|ap|anpi|vmenet|nan)\d*$/;
+
+const num = (s) => (/^\d+$/.test(s) ? Number(s) : NaN);
+
+// /proc/stat → the total and idle jiffies of all CPUs together.
+function parseProcStat(text) {
+  const line = String(text ?? "").split("\n").find((l) => l.startsWith("cpu "));
+  if (!line) return null;
+  // user nice system idle iowait irq softirq steal; guest time is already in user.
+  const f = line.trim().split(/\s+/).slice(1, 9).map(num);
+  if (f.length < 4 || f.some(Number.isNaN)) return null;
+  const total = f.reduce((a, b) => a + b, 0);
+  return { total, idle: f[3] + (f[4] ?? 0) };
+}
+
+// The busy percent between two samples of parseProcStat (or os.cpus() sums).
+function cpuPercent(prev, cur) {
+  if (!prev || !cur) return null;
+  const total = cur.total - prev.total, idle = cur.idle - prev.idle;
+  if (!(total > 0)) return null;
+  return Math.max(0, Math.min(100, 100 * (1 - idle / total)));
+}
+
+// /proc/meminfo → bytes used and in all: what the kernel says it can't hand out.
+function parseMeminfo(text) {
+  const kb = (key) => {
+    const m = String(text ?? "").match(new RegExp(`^${key}:\\s+(\\d+)\\s*kB`, "m"));
+    return m ? Number(m[1]) * 1024 : NaN;
+  };
+  const total = kb("MemTotal"), free = kb("MemAvailable");
+  if (!(total > 0) || Number.isNaN(free)) return null;
+  return { used: Math.max(0, total - free), total };
+}
+
+// `vm_stat` and the machine's memory → bytes used, as Activity Monitor's "Memory
+// Used" counts it: app memory, wired and compressed. os.freemem() is no help on
+// macOS: it counts only the free pages, a sliver of what can be handed out.
+function parseVmStat(text, totalBytes) {
+  const s = String(text ?? "");
+  const page = Number(s.match(/page size of (\d+) bytes/)?.[1]);
+  const total = Number(totalBytes);
+  if (!(page > 0) || !(total > 0)) return null;
+  const pages = {};
+  for (const line of s.split("\n")) {
+    const m = line.trim().match(/^"?(.+?)"?:\s+(\d+)\.?$/);
+    if (m) pages[m[1]] = Number(m[2]);
+  }
+  const need = ["Anonymous pages", "Pages purgeable", "Pages wired down", "Pages occupied by compressor"];
+  if (need.some((k) => pages[k] == null)) return null;
+  const used = (pages["Anonymous pages"] - pages["Pages purgeable"] + pages["Pages wired down"] + pages["Pages occupied by compressor"]) * page;
+  return { used: Math.max(0, Math.min(total, used)), total };
+}
+
+// /proc/net/dev → bytes received and sent so far by the physical interfaces.
+// `isVirtual(name)` (true/false, or undefined when it doesn't know) beats the name list.
+function parseNetDev(text, isVirtual) {
+  let rx = 0, tx = 0, seen = 0;
+  for (const line of String(text ?? "").split("\n").slice(2)) {
+    const at = line.indexOf(":");
+    if (at < 0) continue;
+    const name = line.slice(0, at).trim();
+    const f = line.slice(at + 1).trim().split(/\s+/).map(num);
+    if (!name || f.length < 9 || Number.isNaN(f[0]) || Number.isNaN(f[8])) continue;
+    seen++;
+    if (name === "lo" || (isVirtual?.(name) ?? VIRTUAL.test(name))) continue;
+    rx += f[0]; tx += f[8];
+  }
+  return seen ? { rx, tx } : null;
+}
+
+// `netstat -ibn` (macOS) → the same. Only the <Link#N> row of each interface has
+// its own counters; rows without an address have one field fewer, so read from the end.
+function parseNetstat(text) {
+  let rx = 0, tx = 0, seen = 0;
+  for (const line of String(text ?? "").split("\n")) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 10 || !/^<Link#\d+>$/.test(f[2])) continue;
+    const ib = num(f.at(-5)), ob = num(f.at(-2));
+    if (Number.isNaN(ib) || Number.isNaN(ob)) continue;
+    seen++;
+    // A trailing * marks an interface that is down.
+    if (MAC_VIRTUAL.test(f[0].replace(/\*$/, ""))) continue;
+    rx += ib; tx += ob;
+  }
+  return seen ? { rx, tx } : null;
+}
+
+// Bytes per second between two counter samples ({ rx, tx, at } with `at` in ms).
+// Counters that went backwards (an interface gone) count as no traffic.
+function rate(prev, cur) {
+  if (!prev || !cur) return null;
+  const s = (cur.at - prev.at) / 1000;
+  if (!(s > 0)) return null;
+  return { rx: Math.max(0, cur.rx - prev.rx) / s, tx: Math.max(0, cur.tx - prev.tx) / s };
+}
+
+// A metric worked out from two samples (CPU, network) after a new one:
+// null when it failed, undefined until there are two. `base` is kept for the next.
+function step(base, cur, delta) {
+  if (!cur) return { value: null, base: null };
+  return { value: base ? delta(base, cur) ?? undefined : undefined, base: cur };
+}
+
+const UNITS = ["B", "KB", "MB", "GB", "TB"];
+const scale = (n) => {
+  let i = 0;
+  while (n >= 1024 && i < UNITS.length - 1) { n /= 1024; i++; }
+  return [n, i];
+};
+// 512 B, 40 KB, 1.2 MB, 28.0 GB.
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  const [v, i] = scale(n);
+  return `${v.toFixed(i >= 3 || (i > 0 && v < 10) ? 1 : 0)} ${UNITS[i]}`;
+}
+const formatRate = (n) => (Number.isFinite(n) && n >= 0 ? `${formatBytes(n)}/s` : "—");
+// For tight spots: 40K, 1.2M.
+function shortBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  const [v, i] = scale(n);
+  return `${v.toFixed(i > 0 && v < 10 ? 1 : 0)}${UNITS[i][0]}`;
+}
+// Used of total in the total's unit: 28.0/32.0 GB.
+function formatPair(used, total) {
+  if (!(total > 0) || !(used >= 0)) return "—";
+  const [t, i] = scale(total);
+  const u = used / 1024 ** i;
+  const d = i >= 3 || (i > 0 && t < 10) ? 1 : 0;
+  return `${u.toFixed(d)}/${t.toFixed(d)} ${UNITS[i]}`;
+}
+
+const memPercent = (m) => (m && m.total > 0 ? (100 * m.used) / m.total : null);
+
+// A run() result → what `parse` makes of its output, or null when the program
+// failed: it couldn't start or timed out (error: run() reports a kill as code 0),
+// exited non-zero, or printed nothing.
+function readout(r, parse) {
+  if (!r || r.error || r.code !== 0 || !r.stdout) return null;
+  try { return parse(r.stdout) ?? null; } catch { return null; }
+}
+
+// One metric's text: "—" before the first reading, "unavailable" when it can't be read.
+const label = (v, show) => (v === undefined ? "—" : v === null ? "unavailable" : show(v));
+
+// All cores' time together, as parseProcStat gives it: os.cpus() has it on Linux and macOS.
+function cpuTimes(cpus = os.cpus()) {
+  if (!cpus?.length) return null;
+  let total = 0, idle = 0;
+  for (const { times: t } of cpus) { total += t.user + t.nice + t.sys + t.idle + t.irq; idle += t.idle; }
+  return total > 0 ? { total, idle } : null;
+}
+
+// Linux lists its virtual interfaces (bridges, VPNs, containers) under
+// /sys/devices/virtual/net; the name list covers what it doesn't.
+const virtualNet = new Map();
+function linuxVirtual(name) {
+  if (!virtualNet.has(name)) virtualNet.set(name, fs.existsSync(path.join("/sys/devices/virtual/net", name)) ? true : undefined);
+  return virtualNet.get(name);
+}
+
+const readText = (file) => fs.promises.readFile(file, "utf8").catch(() => null);
+
+// One reading of each source; null for one that failed. Programs by absolute path:
+// Herdr's PATH may be thinner than your shell's.
+async function readStats() {
+  const at = Date.now(), cpu = cpuTimes();
+  if (process.platform === "darwin") {
+    const [vm, ns] = await Promise.all([run("/usr/bin/vm_stat", [], STATS_TIMEOUT), run("/usr/sbin/netstat", ["-ibn"], STATS_TIMEOUT)]);
+    return { cpu, mem: readout(vm, (t) => parseVmStat(t, os.totalmem())), net: readout(ns, parseNetstat), at };
+  }
+  const [mem, dev] = await Promise.all([readText("/proc/meminfo"), readText("/proc/net/dev")]);
+  return { cpu, mem: mem ? parseMeminfo(mem) : null, net: dev ? parseNetDev(dev, linuxVirtual) : null, at };
+}
+
+// Turn a reading into what the stats line shows, keeping it as the base for the next.
+function applyStats(r) {
+  const cpu = step(ui.cpuBase, r.cpu, cpuPercent);
+  const net = step(ui.netBase, r.net ? { ...r.net, at: r.at } : null, rate);
+  ui.cpuBase = cpu.base;
+  ui.netBase = net.base;
+  ui.stats = { cpu: cpu.value, mem: r.mem, net: net.value };
+}
+
+// Start the stats over: the next sample sets new bases, so the first CPU percent and
+// rate after a collapse or expand cover only the time since.
+function resetStats() {
+  ui.stats = {};
+  ui.cpuBase = ui.netBase = null;
+}
+
+// Each metric that can't be read shows "unavailable" on its own; none of it touches
+// the usage rows or their errors, and the stats line never changes the pane's height.
+async function sampleStats() {
+  if (ui.sampling) return;
+  ui.sampling = true;
+  try { applyStats(await readStats()); } catch { applyStats({ cpu: null, mem: null, net: null, at: Date.now() }); }
+  ui.sampling = false;
+  draw();
+}
+
 // ── Time ────────────────────────────────────────────────────────────────────
 
 // Time until `iso`: 42m, 3h05, 5d3h.
@@ -213,6 +427,21 @@ function row(p, layout, issue, now = Date.now()) {
 // The highest percent of one window across accounts, for the collapsed header.
 const peak = (profiles, key) => profiles.reduce((m, p) => (p[key] ? Math.max(m ?? 0, Math.round(p[key].percent)) : m), null);
 
+// The machine's line: " cpu 12% · mem 28.0/32.0 GB · net ↓1.2 MB/s ↑40 KB/s". When
+// that doesn't fit it drops the network, then the memory totals, then cuts.
+function statsRow(cols, s = ui.stats) {
+  const pct = (v) => label(v, (x) => `${Math.round(x)}%`);
+  const color = (p) => (p == null ? dim : tone(Math.round(p)));
+  const mp = memPercent(s.mem);
+  const cpu = ["cpu ", pct(s.cpu), color(s.cpu)];
+  const memFull = ["mem ", label(s.mem, (m) => formatPair(m.used, m.total)), color(mp)];
+  const memShort = ["mem ", pct(s.mem && mp), color(mp)];
+  const net = ["net ", label(s.net, (n) => `↓${formatRate(n.rx)} ↑${formatRate(n.tx)}`), s.net ? (x) => x : dim];
+  const choices = [[cpu, memFull, net], [cpu, memFull], [cpu, memShort]];
+  const parts = choices.find((c) => width(" " + c.map(([k, v]) => k + v).join(" · ")) <= cols) ?? choices.at(-1);
+  return clip(" " + parts.map(([k, v, c]) => dim(k) + c(v)).join(dim(" · ")), cols);
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 const ui = {
@@ -227,6 +456,10 @@ const ui = {
   frame: 0,
   buttons: [],
   sized: null,       // the content rows the pane was last fitted to
+  stats: {},         // cpu, mem, net: a value, undefined until there is one, null when it can't be read
+  cpuBase: null,     // the last CPU times and byte counters, for the next percent and rate
+  netBase: null,
+  sampling: false,
 };
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 let mcc = null;
@@ -297,10 +530,11 @@ function resizeStep(have, want, span) {
 }
 
 // The rows the panel's content wants: header only when collapsed (Herdr keeps a
-// pane at least a tenth of its split, so a few rows still show), else everything.
+// pane at least a tenth of its split, so a few rows still show), else everything:
+// header, stats line, rule, rows, notices and footer.
 function wantedRows() {
   if (ui.collapsed) return 1;
-  return 2 + Math.max(1, ui.profiles.length) + noticeLines().length + 1;
+  return 3 + Math.max(1, ui.profiles.length) + noticeLines().length + 1;
 }
 
 function snapshotRect() {
@@ -342,8 +576,10 @@ function toggleCollapsed() {
   ui.collapsed = !ui.collapsed;
   ui.top = 0;
   saveCollapsed();
+  resetStats();
   resize();
   draw();
+  sampleStats();
 }
 
 // ── Draw ────────────────────────────────────────────────────────────────────
@@ -365,17 +601,25 @@ function header(cols) {
   const now = Date.now();
   const caret = ui.collapsed ? "▸" : "▾";
   const refreshLabel = ui.refreshing ? ` ${SPIN[ui.frame % SPIN.length]} refreshing ` : " ↻ refresh ";
+  const title = ` ${caret} mcc usage`;
+  const room = cols - width(title) - width(refreshLabel) - 2;
   let info = "";
-  if (ui.collapsed && ui.profiles.length) {
-    const f = peak(ui.profiles, "five"), w = peak(ui.profiles, "week");
-    info = `5h ${f ?? "—"}${f == null ? "" : "%"} · wk ${w ?? "—"}${w == null ? "" : "%"}`;
+  if (ui.collapsed) {
+    const s = ui.stats, parts = [];
+    if (ui.profiles.length) {
+      const f = peak(ui.profiles, "five"), w = peak(ui.profiles, "week");
+      parts.push(`5h ${f ?? "—"}${f == null ? "" : "%"}`, `wk ${w ?? "—"}${w == null ? "" : "%"}`);
+    }
+    const pct = (v) => label(v, (x) => `${Math.round(x)}%`);
+    parts.push(`cpu ${pct(s.cpu)}`, `mem ${pct(s.mem && memPercent(s.mem))}`);
+    info = parts.join(" · ");
+    const net = `${info} · net ${label(s.net, (n) => `↓${shortBytes(n.rx)} ↑${shortBytes(n.tx)}`)}`;
+    if (width(net) <= room) info = net;
   } else {
     const times = ui.profiles.map((p) => p.updatedAt).filter(Boolean).map(Date.parse).filter(Number.isFinite);
     if (ui.lastLive && now - ui.lastLive < 60000) info = "updated just now";
     else if (times.length) info = `updated ${ago(new Date(Math.max(...times)).toISOString(), now)}`;
   }
-  const title = ` ${caret} mcc usage`;
-  const room = cols - width(title) - width(refreshLabel) - 2;
   const infoText = room > 6 ? fit(info, room) : "";
   const gap = Math.max(1, cols - width(title) - width(infoText) - width(refreshLabel) - 1);
   ui.buttons.push({ row: 0, from: 0, to: width(title) + 1, action: toggleCollapsed });
@@ -390,7 +634,7 @@ function draw() {
   const out = [header(cols)];
   const notices = noticeLines();
   const footer = ui.collapsed ? [] : [dim(fit(" r refresh · c collapse · q close", cols))];
-  if (!ui.collapsed) out.push(dim("─".repeat(cols)));
+  if (!ui.collapsed) out.push(statsRow(cols), dim("─".repeat(cols)));
 
   const nameWidth = Math.min(16, Math.max(4, ...ui.profiles.map((p) => width(p.name))));
   const layout = columns(cols, nameWidth);
@@ -473,10 +717,17 @@ function main() {
 
   setInterval(() => { if (ui.refreshing) { ui.frame++; draw(); } }, 100);
   setInterval(() => { if (!ui.refreshing) load(); }, POLL);
+  // Sampled while collapsed too: the title line shows CPU and memory then.
+  setInterval(sampleStats, STATS);
 
   draw();
+  sampleStats();
   load().then(resize).then(draw);
 }
 
 if (require.main === module) main();
-else module.exports = { width, fit, clip, until, ago, flag, parse, firstError, columns, row, cell, cellWidthFor, peak, parentSplit, resizeStep, reasonText, findMcc, noticeLines, wantedRows, ui };
+else module.exports = {
+  width, fit, clip, until, ago, flag, parse, firstError, columns, row, cell, cellWidthFor, peak, parentSplit, resizeStep, reasonText, findMcc, noticeLines, wantedRows, ui,
+  parseProcStat, cpuPercent, parseMeminfo, parseVmStat, parseNetDev, parseNetstat, rate, step, formatBytes, formatRate, shortBytes, formatPair, memPercent, readout, label,
+  cpuTimes, readStats, applyStats, resetStats, statsRow, header,
+};
