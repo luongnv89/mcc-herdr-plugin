@@ -1,6 +1,6 @@
 // Tests for the Herdr desktop app's mcc usage section: the pure helpers in
-// herdr-app/mcc-usage/usage.js (an ES module, loaded through a data: URL) and the
-// layout edits herdr-app/install.js makes.
+// herdr-app/mcc-usage/usage.js and system.js (ES modules, loaded through a data:
+// URL) and the layout edits herdr-app/install.js makes.
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -9,8 +9,11 @@ const path = require("node:path");
 const os = require("node:os");
 const { main, addBlock, removeBlock, pathTo, agentsId, isShipped } = require("../herdr-app/install.js");
 
-const usage = () => import("data:text/javascript;base64," +
-  fs.readFileSync(path.join(__dirname, "..", "herdr-app", "mcc-usage", "usage.js")).toString("base64"));
+const MOD = path.join(__dirname, "..", "herdr-app", "mcc-usage");
+const load = (file) => import("data:text/javascript;base64," + fs.readFileSync(path.join(MOD, file)).toString("base64"));
+const usage = () => load("usage.js");
+const system = () => load("system.js");
+const F = require("./system-fixtures.js");
 
 const doc = (profiles) => JSON.stringify({ schema: 2, profiles });
 const profile = (name, usage, extra = {}) => ({ name, is_default: name === "default", usage, login_warning: false, login_expires_at: null, ...extra });
@@ -87,6 +90,15 @@ test("block height: the header alone when hidden, else every line", async () => 
   assert.equal(blockHeight({ hidden: false, rows: 0, notices: 1 }), SIZES.header + SIZES.labels + SIZES.row + SIZES.notice + SIZES.bottom);
 });
 
+test("block height with the stats line: one more line when the values show, none when hidden", async () => {
+  const { blockHeight, SIZES } = await usage();
+  assert.equal(blockHeight({ hidden: false, rows: 2, notices: 1, stats: true }), SIZES.header + SIZES.stats + SIZES.labels + 2 * SIZES.row + SIZES.notice + SIZES.bottom);
+  assert.equal(blockHeight({ hidden: true, rows: 2, notices: 1, stats: true }), SIZES.header);
+  const button = 2 * SIZES.railPad + SIZES.row;
+  assert.equal(blockHeight({ rail: true, hidden: false, rows: 2, stats: true }), button + 2 * SIZES.row + 3 * SIZES.railStat);
+  assert.equal(blockHeight({ rail: true, hidden: true, rows: 2, stats: true }), button);
+});
+
 test("block height on the rail: the eye button, then one line per account, no header or notices", async () => {
   const { blockHeight, SIZES } = await usage();
   const button = 2 * SIZES.railPad + SIZES.row;
@@ -101,6 +113,106 @@ test("staleAge says how old stale numbers are, and nothing for fresh ones", asyn
   assert.equal(staleAge({ updatedAt: null }, NOW), "");
   assert.equal(staleAge({ updatedAt: "2026-11-05T18:50:00Z" }, NOW), "3h");
   assert.equal(staleAge({ updatedAt: "2026-11-03T21:00:00Z" }, NOW), "2d");
+});
+
+// main.js runs only inside the app, so check here that every name it imports from
+// its sibling modules is one they export: a typo would otherwise ship.
+test("every name main.js imports from system.js and usage.js exists", async () => {
+  const src = fs.readFileSync(path.join(MOD, "main.js"), "utf8");
+  const modules = { "system.js": await system(), "usage.js": await usage() };
+  const seen = new Set();
+  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\/(system|usage)\.js"/g)) {
+    const file = `${m[2]}.js`;
+    seen.add(file);
+    for (const spec of m[1].split(",").map((x) => x.trim()).filter(Boolean)) {
+      const name = spec.split(/\s+as\s+/)[0];
+      assert.ok(name in modules[file], `main.js imports ${name} from ./${file}, which doesn't export it`);
+    }
+  }
+  assert.deepEqual([...seen].sort(), ["system.js", "usage.js"]);
+});
+
+test("CPU: /proc/stat samples and iostat", async () => {
+  const { parseProcStat, cpuPercent, parseIostat } = await system();
+  const a = parseProcStat(F.PROC_STAT_1), b = parseProcStat(F.PROC_STAT_2);
+  assert.deepEqual(a, { total: 1000, idle: 850 });
+  assert.equal(Math.round(cpuPercent(a, b) * 10) / 10, 16.7);
+  assert.equal(cpuPercent(null, b), null);
+  assert.equal(cpuPercent(b, b), null, "no time passed");
+  assert.equal(parseIostat(F.IOSTAT), 31, "the last line, not the since-boot one");
+  for (const bad of [F.EMPTY, F.GARBAGE, null]) {
+    assert.equal(parseProcStat(bad), null);
+    assert.equal(parseIostat(bad), null);
+  }
+});
+
+test("memory: /proc/meminfo and vm_stat", async () => {
+  const { parseMeminfo, parseVmStat, memPercent } = await system();
+  assert.deepEqual(parseMeminfo(F.MEMINFO), { used: (16384000 - 8192000) * 1024, total: 16384000 * 1024 });
+  // Anonymous - purgeable + wired + compressor, in 16 KB pages.
+  const mac = parseVmStat(F.VM_STAT, F.MEMSIZE);
+  assert.deepEqual(mac, { used: (764905 - 8234 + 203523 + 716032) * 16384, total: F.MEMSIZE });
+  assert.equal(Math.round(memPercent(mac)), 80);
+  assert.equal(parseVmStat(F.VM_STAT, NaN), null, "no total");
+  assert.equal(parseVmStat(F.VM_STAT.replace(/^Anonymous pages.*$/m, ""), F.MEMSIZE), null, "a field missing");
+  for (const bad of [F.EMPTY, F.GARBAGE, null]) {
+    assert.equal(parseMeminfo(bad), null);
+    assert.equal(parseVmStat(bad, F.MEMSIZE), null);
+  }
+});
+
+test("network: physical interfaces only, from /proc/net/dev and netstat", async () => {
+  const { parseNetDev, netDevNames, parseNetstat } = await system();
+  assert.deepEqual(parseNetDev(F.NET_DEV), { rx: 5200, tx: 3100 }, "eth0 + wlan0");
+  // What Linux says about an interface beats the name list.
+  assert.deepEqual(parseNetDev(F.NET_DEV, (n) => (n === "eth0" ? true : n === "wg0" ? false : undefined)), { rx: 900, tx: 700 });
+  assert.deepEqual(netDevNames(F.NET_DEV), ["lo", "eth0", "wg0", "tailscale0", "docker0", "lxdbr0", "podman0", "wlan0"]);
+  assert.deepEqual(parseNetstat(F.NETSTAT), { rx: 1300, tx: 700 }, "en0 + en1");
+  for (const bad of [F.EMPTY, F.GARBAGE, null]) {
+    assert.equal(parseNetDev(bad), null);
+    assert.equal(parseNetstat(bad), null);
+  }
+});
+
+test("rate: bytes per second over the time measured, never negative", async () => {
+  const { rate, step } = await system();
+  assert.deepEqual(rate({ rx: 1000, tx: 500, at: 0 }, { rx: 3000, tx: 500, at: 2000 }), { rx: 1000, tx: 0 });
+  assert.deepEqual(rate({ rx: 3000, tx: 500, at: 0 }, { rx: 1000, tx: 900, at: 1000 }), { rx: 0, tx: 400 }, "a counter reset");
+  assert.equal(rate(null, { rx: 1, tx: 1, at: 1 }), null);
+  assert.equal(rate({ rx: 1, tx: 1, at: 5 }, { rx: 2, tx: 2, at: 5 }), null);
+  // The first sample only sets the base; a failed one shows null and drops it.
+  const first = step(null, { rx: 0, tx: 0, at: 0 }, rate);
+  assert.equal(first.value, undefined);
+  assert.deepEqual(step(first.base, { rx: 2048, tx: 0, at: 2000 }, rate).value, { rx: 1024, tx: 0 });
+  assert.deepEqual(step(first.base, null, rate), { value: null, base: null });
+});
+
+test("formats: sizes, rates and used of total", async () => {
+  const { formatBytes, formatRate, shortBytes, formatPair } = await system();
+  assert.deepEqual([0, 512, 40 * 1024, 1.2 * 1024 ** 2, 28 * 1024 ** 3].map(formatBytes), ["0 B", "512 B", "40 KB", "1.2 MB", "28.0 GB"]);
+  assert.equal(formatRate(1.2 * 1024 ** 2), "1.2 MB/s");
+  assert.equal(formatRate(NaN), "—");
+  assert.deepEqual([40 * 1024, 1.2 * 1024 ** 2].map(shortBytes), ["40K", "1.2M"]);
+  assert.equal(formatPair(28 * 1024 ** 3, 32 * 1024 ** 3), "28.0/32.0 GB");
+  assert.equal(formatPair(1, 0), "—");
+});
+
+test("a source that fails reads as unavailable; the others still show", async () => {
+  const { readout, label, statsTip, parseNetstat } = await system();
+  const ok = { code: 0, stdout: F.NETSTAT };
+  assert.deepEqual(readout(ok, parseNetstat), { rx: 1300, tx: 700 });
+  assert.equal(readout(null, parseNetstat), null, "it couldn't start");
+  assert.equal(readout({ ...ok, code: 1 }, parseNetstat), null, "non-zero exit");
+  assert.equal(readout({ ...ok, code: null }, parseNetstat), null, "killed");
+  assert.equal(readout({ ...ok, error: new Error("timed out") }, parseNetstat), null, "timed out");
+  assert.equal(readout({ code: 0, stdout: "" }, parseNetstat), null, "no output");
+  assert.equal(readout({ code: 0, stdout: F.GARBAGE }, parseNetstat), null, "nothing it can read");
+  assert.equal(readout(ok, () => { throw new Error("bad"); }), null);
+  assert.deepEqual([label(undefined, String), label(null, String), label(5, (v) => `${v}%`)], ["—", "unavailable", "5%"]);
+  const tip = statsTip({ cpu: 12.4, mem: null, net: undefined });
+  assert.match(tip, /^CPU: 12% busy$/m);
+  assert.match(tip, /^Memory: unavailable$/m);
+  assert.match(tip, /^Network: —$/m);
 });
 
 // The shape of Herdr's main layout (and clones of it): spaces and agents share
@@ -169,7 +281,7 @@ test("isShipped: Herdr's own layouts, by installed.json or by name", (t) => {
 test("main installs into the shown layout: copies the mod, backs the layout up, adds the block", (t) => {
   const { home, env, layout, mod } = appHomeFixture(t);
   main([], env);
-  for (const f of ["main.js", "usage.js", "mod.json"]) assert.ok(fs.existsSync(path.join(mod, f)), f);
+  for (const f of ["main.js", "usage.js", "system.js", "mod.json"]) assert.ok(fs.existsSync(path.join(mod, f)), f);
   assert.ok(!fs.existsSync(path.join(mod, "jsconfig.json")), "files the app writes aren't copied");
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "layouts", "mine.json.bak-mcc-usage"), "utf8")), mainLike());
   assert.ok(pathTo(layout("mine"), "mcc-usage"));
