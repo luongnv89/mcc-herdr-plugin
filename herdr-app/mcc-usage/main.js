@@ -299,12 +299,15 @@ export default class Usage extends View {
   // This machine's CPU, memory and network on one line; the tooltip has the detail.
   statsLine(t) {
     const s = this.stats;
+    // CPU stays whole; memory and network give way when the sidebar is narrow.
     const part = (name, text, color) => h_flex().flex_none().gap(3).items_center()
       .child(div().text_color(t.dim).child(name)).child(div().text_color(color).child(text));
+    const shrink = (name, text, color) => h_flex().flex_shrink(1).min_w(0).gap(3).items_center()
+      .child(div().flex_none().text_color(t.dim).child(name)).child(div().min_w(0).truncate().text_color(color).child(text));
     return h_flex().id("mu-stats").h(SIZES.stats).px(8).flex_none().gap(8).items_center().overflow_hidden().text_size(11)
       .tooltip(statsTip(s))
       .child(part("CPU", label(s.cpu, (v) => `${Math.round(v)}%`), this.statColor(t, s.cpu)))
-      .child(part("Mem", label(s.mem, (m) => formatPair(m.used, m.total)), this.statColor(t, memPercent(s.mem))))
+      .child(shrink("Mem", label(s.mem, (m) => formatPair(m.used, m.total)), this.statColor(t, memPercent(s.mem))))
       .child(h_flex().flex_1().min_w(0).gap(3).items_center()
         .child(div().flex_none().text_color(t.dim).child("Net"))
         .child(div().min_w(0).truncate().text_color(s.net ? t.foreground : t.dim)
