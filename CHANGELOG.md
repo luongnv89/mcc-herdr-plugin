@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Mistral Vibe.** Both the terminal panel and the app's Usage section show a Mistral row under the accounts: your Mistral Vibe plan (Pro, say), how much of the month's Vibe allowance you've used (same colours, with a pay-as-you-go note past 100%) and when it resets. With no subscription to show it says why: Vibe isn't installed, you aren't logged in, the account is unavailable or the usage can't be read. `herdr-app/mcc-usage/mistral-status.cjs` asks Vibe's `vibe-app-server` (found at `$VIBE_APP_SERVER_BIN`, on `PATH` or in `~/.local/bin`) at start, on refresh and every 5 minutes, and prints only the plan, status and usage: never the API key, offers or ids. Each read leaves a ~1 KB session folder under `~/.vibe/logs/session/unified/`.
+
 ## 0.2.0 (2026-11-11)
 
 - **Herdr app.** A Usage section for the Herdr desktop app's left sidebar, under Agents (`herdr-app/mcc-usage`): every mcc account's 5-hour and weekly usage as small bars, with an eye button that shows or hides the values (the section shrinks to its title line), a ↻ button for a live lookup, and tooltips with reset times. `node herdr-app/install.js` copies it and adds it to your layout; `--uninstall` takes it out. Key commands: `mcc-usage.toggle`, `.show`, `.hide`, `.refresh`.
