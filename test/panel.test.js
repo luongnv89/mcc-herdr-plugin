@@ -269,10 +269,88 @@ test("collapsed, the title line adds CPU and memory, and the network when there'
   }
 });
 
-test("wantedRows counts the stats line when expanded, still one row collapsed", (t) => {
-  withUi(t, { collapsed: false, profiles: p.parse(DOC), issues: {}, error: null });
-  // header, stats line, rule, 3 accounts, 2 notices, footer.
-  assert.equal(p.wantedRows(), 3 + 3 + 2 + 1);
+test("wantedRows counts the stats line and the Mistral row when expanded, still one row collapsed", (t) => {
+  withUi(t, { collapsed: false, profiles: p.parse(DOC), issues: {}, error: null, mistral: null });
+  // header, stats line, rule, 3 accounts, the Mistral row, 2 notices, footer.
+  assert.equal(p.wantedRows(), 3 + 3 + 1 + 2 + 1);
+  // The Mistral row is one line whatever it says, so a read never resizes the pane.
+  for (const mistral of [{ found: false }, { found: true, status: null, error: "x" }, { found: true, status: "ready", plan: null, budget: null }]) {
+    p.ui.mistral = mistral;
+    assert.equal(p.wantedRows(), 3 + 3 + 1 + 2 + 1);
+  }
   p.ui.collapsed = true;
   assert.equal(p.wantedRows(), 1);
+});
+
+// ── Mistral ─────────────────────────────────────────────────────────────────
+
+const MISTRAL_JS = path.join(__dirname, "..", "herdr-app", "mcc-usage", "mistral.js");
+const mistral = () => import("data:text/javascript;base64," + fs.readFileSync(MISTRAL_JS).toString("base64"));
+const MNOW = Date.parse("2026-11-17T19:00:00Z");
+const READY = { found: true, status: "ready", plan: { kind: "chat", name: "INDIVIDUAL", title: "Pro" }, budget: { usagePercentage: 0.62, resetAt: "2026-12-01T00:00:00Z", paygEnabled: false } };
+const MISTRAL_STATES = {
+  loading: null,
+  ready: READY,
+  busy: { ...READY, budget: { usagePercentage: 87.3, resetAt: "2026-11-18T02:00:00Z", paygEnabled: false } },
+  payg: { ...READY, plan: { kind: "mistral_code", name: "A VERY LONG TEAM PLAN NAME INDEED", title: null }, budget: { usagePercentage: 1400, resetAt: null, paygEnabled: true } },
+  noBudget: { ...READY, budget: null },
+  notFound: { found: false },
+  missingKey: { found: true, status: "missing_key", plan: null, budget: null },
+  unauthorized: { found: true, status: "unauthorized", plan: null, budget: null },
+  unavailable: { found: true, status: "unavailable", plan: null, budget: null },
+  error: { found: true, status: null, error: "vibe-app-server timed out" },
+};
+
+test("panel.js's Mistral functions are mistral.js's, word for word", () => {
+  const src = fs.readFileSync(MISTRAL_JS, "utf8");
+  const theirs = src.slice(src.indexOf("const MISTRAL_STATUSES"), src.indexOf("export {")).trim();
+  const panel = fs.readFileSync(path.join(__dirname, "..", "panel.js"), "utf8");
+  const start = panel.indexOf("const MISTRAL_STATUSES");
+  const ours = panel.slice(start, panel.indexOf("// ── Time", start)).trim();
+  assert.equal(ours, theirs);
+});
+
+test("panel.js's Mistral functions give what mistral.js's give", async () => {
+  const m = await mistral();
+  const outs = ["", "garbage", '{"found":false}', JSON.stringify(READY), JSON.stringify({ ...READY, apiKey: { preview: "x" } }) + "\n", JSON.stringify({ found: true, status: "odd" })];
+  for (const o of outs) assert.deepEqual(p.parseStatus(o), m.parseStatus(o), o);
+  for (const e of ["", "Error: Cannot find module 'x'", null]) assert.deepEqual(p.failedStatus(e), m.failedStatus(e));
+  for (const pct of [0, 0.62, 9.96, 80, 95, 140]) {
+    assert.equal(p.pctText(pct), m.pctText(pct));
+    assert.equal(p.mistralLevel(pct), m.mistralLevel(pct));
+  }
+  for (const [name, s] of Object.entries(MISTRAL_STATES)) {
+    assert.deepEqual(p.mistralView(s, MNOW), m.mistralView(s, MNOW), name);
+    assert.equal(p.mistralTip(s, MNOW), m.mistralTip(s, MNOW), name);
+    assert.equal(p.planLabel(s?.plan), m.planLabel(s?.plan), name);
+  }
+});
+
+test("the Mistral row never exceeds the pane width, whatever it says", () => {
+  for (const [name, s] of Object.entries(MISTRAL_STATES)) {
+    for (let cols = 16; cols <= 200; cols++) {
+      const text = strip(p.mistralRow(cols, s, MNOW));
+      assert.ok(p.width(text) <= cols, `${name} at ${cols} cols: "${text}" is ${p.width(text)} wide`);
+    }
+  }
+});
+
+test("the Mistral row shows the plan, a bar, the percent and the reset, dropping them when narrow", () => {
+  assert.equal(strip(p.mistralRow(80, READY, MNOW)), " Mistral Pro  ░░░░░░░░░░░░ 0.6% 13d5h");
+  assert.equal(strip(p.mistralRow(30, READY, MNOW)), " Mistral Pro  0.6% 13d5h");
+  assert.equal(strip(p.mistralRow(80, MISTRAL_STATES.busy, MNOW)), " Mistral Pro  ██████████░░ 87% 7h00");
+  assert.match(strip(p.mistralRow(80, MISTRAL_STATES.payg, MNOW)), /1400% pay-as-you-go$/);
+});
+
+test("with no Mistral subscription, the row says why", () => {
+  assert.equal(strip(p.mistralRow(80, MISTRAL_STATES.notFound, MNOW)), " Mistral Vibe not found: install it or set VIBE_APP_SERVER_BIN");
+  assert.equal(strip(p.mistralRow(80, MISTRAL_STATES.missingKey, MNOW)), " Mistral: not logged in · run vibe");
+  assert.equal(strip(p.mistralRow(80, MISTRAL_STATES.noBudget, MNOW)), " Mistral Pro: usage unavailable");
+  assert.equal(strip(p.mistralRow(80, MISTRAL_STATES.error, MNOW)), " Mistral: vibe-app-server timed out");
+  assert.equal(strip(p.mistralRow(80, null, MNOW)), " Mistral: loading…");
+});
+
+test("the panel runs the helper from its own folder", () => {
+  assert.equal(p.MISTRAL_HELPER, path.join(__dirname, "..", "herdr-app", "mcc-usage", "mistral-status.cjs"));
+  assert.ok(fs.existsSync(p.MISTRAL_HELPER));
 });

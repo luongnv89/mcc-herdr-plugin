@@ -2,7 +2,8 @@
 
 A [Herdr](https://herdr.dev) plugin that shows the 5-hour and weekly Claude Code usage
 of every account [mcc](https://github.com/luongnv89/mcc) manages, in a small pane at the bottom-left of the
-tab, right under the sidebar's agent list, with this machine's CPU, memory and network.
+tab, right under the sidebar's agent list, with this machine's CPU, memory and network
+and your Mistral Vibe subscription's plan and usage.
 
 ```
  ▾ mcc usage                                        updated 4m ago  ↻ refresh
@@ -11,6 +12,7 @@ tab, right under the sidebar's agent list, with this machine's CPU, memory and n
  default    5h ██░░░░░░░░░░  14%   3h55    wk █░░░░░░░░░░░   7%   5d16h
  csdaisy    5h █░░░░░░░░░░░  12%   5m      wk ░░░░░░░░░░░░   2%   2d9h
  csluong    5h ············    —           wk ██░░░░░░░░░░  16%   5d16h  ⚠ 11h ago
+ Mistral Pro  ░░░░░░░░░░░░ 0.6% 13d5h
  csluong: login expired · mcc login csluong
  r refresh · c collapse · q close
 ```
@@ -29,10 +31,19 @@ The line under the title shows this machine's CPU and memory use (green, yellow 
 A value it can't read says `unavailable`; the usage rows still show. A narrow pane
 drops the network, then the memory totals.
 
+The row under the accounts is your Mistral Vibe subscription: its plan (Pro, say),
+how much of the month's Vibe allowance you've used, in the same colours, and the time
+until it resets. Over 100% it says whether pay-as-you-go picks up the rest. With no
+subscription to show, the row says why instead: Mistral Vibe isn't installed, you
+aren't logged in (`vibe` logs you in), the account is unavailable, or the usage
+can't be read. See [Mistral Vibe](#mistral-vibe).
+
 ## Install
 
 You need Node 20 or later, Herdr 0.9.5 or later, and [mcc](https://github.com/luongnv89/mcc) on your `PATH`. If Herdr's
-server can't find `mcc`, set `MCC_BIN` to its full path.
+server can't find `mcc`, set `MCC_BIN` to its full path. The Mistral row needs
+Mistral Vibe (its `vibe-app-server`); without
+it the row says it isn't installed and the rest works as before.
 
 ```bash
 herdr plugin install luongnv89/mcc-herdr-plugin
@@ -90,7 +101,30 @@ account's OAuth token to Anthropic's undocumented, rate-limited usage endpoint, 
 only runs when you ask for it. For the details, see `mcc usage --help`. Between
 refreshes, the panel rereads mcc's cache (`mcc usage --json-v2`, a local file read)
 every 30 seconds. That picks up whatever `mcc statusline` caches as you work. The
-CPU, memory and network update by themselves every 5 seconds.
+CPU, memory and network update by themselves every 5 seconds. Refresh also rereads
+the Mistral row, which otherwise updates when the panel starts and every 5 minutes.
+
+## Mistral Vibe
+
+The Mistral row asks Mistral Vibe itself. `herdr-app/mcc-usage/mistral-status.cjs`
+starts Vibe's app server (`vibe-app-server`), says hello the way Vibe's own clients
+do, opens a throwaway session, reads the account (`account/read`), deletes the
+session and stops the server. That takes about 2 seconds, and the helper gives up
+after 20. It finds the server at `$VIBE_APP_SERVER_BIN`, else on your `PATH`, else
+in `~/.local/bin` (where Vibe's `uv` install puts it); set `VIBE_APP_SERVER_BIN` to
+its full path if Herdr can't find it.
+
+Because each read starts a server, the row is read only when the panel or section
+starts, when you refresh and every 5 minutes, never on the 30-second reread, and
+never two at once. Each read leaves a small session folder (about 1 KB) under
+`~/.vibe/logs/session/unified/`, as any Vibe session does, and it stays there.
+
+What it shows, and nothing more: whether Vibe was found, the account's status, the
+plan's kind, name and title, and the month's usage percent, reset time and whether
+pay-as-you-go is on. The helper prints only those fields, built one by one, and the
+panel and the section check them again. It never prints or shows your API key (not
+even its preview), offers, ids or the server's error messages, and it never reads
+Vibe's keyring or token files: the server reads your login itself.
 
 ## Why a pane and not part of the sidebar
 
@@ -114,6 +148,7 @@ own version: a **Usage** section in the left sidebar, right under **Agents**.
  default            ▬▬── 47%    ▬─── 24%
  csdaisy            ──── 0%     ▬─── 13%
  work               ▬─── 12%    ▬▬── 38%
+ Mistral Pro             13d5h  ──── 0.6%
 ──────────────────────────────────────────
  ⚙ Settings
 ```
@@ -127,18 +162,24 @@ own version: a **Usage** section in the left sidebar, right under **Agents**.
   show faded, with their age (◷ 3h) beside the name. A name in yellow with ⚠ has a
   problem, and a line under the rows says which `mcc login` fixes it. A failed ↻
   says why in a line of its own.
+- The **Mistral** row under the accounts shows your Mistral Vibe plan, when the
+  month's allowance resets and how much of it you've used, or why it can't (not
+  installed, not logged in, unavailable). Hover it for the detail. It's read when
+  the section starts, on ↻ and every 5 minutes while the values show.
 - The line under the title is this machine's CPU, memory and network, updated
   every 5 seconds while the values show; hover it for the detail. CPU and memory
   take the same colours. One it can't read says `unavailable`, and the rest still show.
 - With the sidebar collapsed to its rail, it shows C, M and N lines for the CPU,
   memory and download rate, then each account's 5-hour percent (faded when stale,
-  ⚠ for a problem), under a 👁 button that shows or hides them.
+  ⚠ for a problem) and a V line with the Mistral percent, under a 👁 button that
+  shows or hides them.
 
 ### Install
 
 You need Herdr app 0.1.13 or later, Node 20 or later to run the installer, and mcc
 on your `PATH` (or in `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin` or
-`/usr/local/bin`).
+`/usr/local/bin`). The Mistral row also runs Node (from the same places) and needs
+Mistral Vibe; see [Mistral Vibe](#mistral-vibe).
 
 ```bash
 git clone https://github.com/luongnv89/mcc-herdr-plugin
@@ -212,13 +253,17 @@ panel opens.
   `usage.js` holds the parts with no Herdr in them (reading mcc's JSON, times,
   notices, the block's height) and `system.js` reads the machine's CPU, memory and
   network from what Linux and macOS print (`panel.js` has a copy of its parsers;
-  a test checks the two agree). After a change, run `node herdr-app/install.js`
-  again: the app reloads the mod as soon as its files change.
+  a test checks the two agree). `mistral-status.cjs` reads the Mistral Vibe status
+  from `vibe-app-server` (both the panel and the mod run it) and `mistral.js` turns
+  what it prints into the Mistral row (`panel.js` has a copy of it too, checked the
+  same way). After a change, run `node herdr-app/install.js` again: the app reloads
+  the mod as soon as its files change.
 - `herdr-app/install.js`: copies the mod and adds its block to your layout.
 - `test/`: unit tests for reading mcc's JSON, the rows at every width, the pane's
   height, how `bind-key` picks a key and edits the config, the app mod's helpers,
-  the machine stats parsers (fixtures in `test/system-fixtures.js`) and where the
-  installer puts the block.
+  the machine stats parsers (fixtures in `test/system-fixtures.js`), where the
+  installer puts the block and the Mistral row (`test/mistral.test.js` runs the
+  helper against a fake `vibe-app-server`).
 
 ## License
 

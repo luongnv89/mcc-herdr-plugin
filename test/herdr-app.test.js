@@ -13,6 +13,7 @@ const MOD = path.join(__dirname, "..", "herdr-app", "mcc-usage");
 const load = (file) => import("data:text/javascript;base64," + fs.readFileSync(path.join(MOD, file)).toString("base64"));
 const usage = () => load("usage.js");
 const system = () => load("system.js");
+const mistral = () => load("mistral.js");
 const F = require("./system-fixtures.js");
 
 const doc = (profiles) => JSON.stringify({ schema: 2, profiles });
@@ -99,6 +100,21 @@ test("block height with the stats line: one more line when the values show, none
   assert.equal(blockHeight({ rail: true, hidden: true, rows: 2, stats: true }), button);
 });
 
+test("block height with the Mistral row: one more row when the values show, a line on the rail", async () => {
+  const { blockHeight, SIZES } = await usage();
+  const full = { hidden: false, rows: 2, notices: 1, stats: true };
+  assert.equal(blockHeight({ ...full, mistral: true }), blockHeight(full) + SIZES.mistral);
+  assert.equal(blockHeight({ ...full, hidden: true, mistral: true }), SIZES.header);
+  const rail = { rail: true, hidden: false, rows: 2, stats: true };
+  assert.equal(blockHeight({ ...rail, mistral: true }), blockHeight(rail) + SIZES.railStat);
+  assert.equal(blockHeight({ ...rail, hidden: true, mistral: true }), 2 * SIZES.railPad + SIZES.row);
+});
+
+test("main.js sizes the block with the Mistral row whenever its values show", () => {
+  const src = fs.readFileSync(path.join(MOD, "main.js"), "utf8");
+  assert.match(src, /blockHeight\(\{[^}]*mistral: !this\.hidden/);
+});
+
 test("block height on the rail: the eye button, then one line per account, no header or notices", async () => {
   const { blockHeight, SIZES } = await usage();
   const button = 2 * SIZES.railPad + SIZES.row;
@@ -117,11 +133,11 @@ test("staleAge says how old stale numbers are, and nothing for fresh ones", asyn
 
 // main.js runs only inside the app, so check here that every name it imports from
 // its sibling modules is one they export: a typo would otherwise ship.
-test("every name main.js imports from system.js and usage.js exists", async () => {
+test("every name main.js imports from system.js, usage.js and mistral.js exists", async () => {
   const src = fs.readFileSync(path.join(MOD, "main.js"), "utf8");
-  const modules = { "system.js": await system(), "usage.js": await usage() };
+  const modules = { "system.js": await system(), "usage.js": await usage(), "mistral.js": await mistral() };
   const seen = new Set();
-  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\/(system|usage)\.js"/g)) {
+  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\/(system|usage|mistral)\.js"/g)) {
     const file = `${m[2]}.js`;
     seen.add(file);
     for (const spec of m[1].split(",").map((x) => x.trim()).filter(Boolean)) {
@@ -129,7 +145,7 @@ test("every name main.js imports from system.js and usage.js exists", async () =
       assert.ok(name in modules[file], `main.js imports ${name} from ./${file}, which doesn't export it`);
     }
   }
-  assert.deepEqual([...seen].sort(), ["system.js", "usage.js"]);
+  assert.deepEqual([...seen].sort(), ["mistral.js", "system.js", "usage.js"]);
 });
 
 test("CPU: /proc/stat samples and iostat", async () => {
@@ -281,7 +297,7 @@ test("isShipped: Herdr's own layouts, by installed.json or by name", (t) => {
 test("main installs into the shown layout: copies the mod, backs the layout up, adds the block", (t) => {
   const { home, env, layout, mod } = appHomeFixture(t);
   main([], env);
-  for (const f of ["main.js", "usage.js", "system.js", "mod.json"]) assert.ok(fs.existsSync(path.join(mod, f)), f);
+  for (const f of ["main.js", "usage.js", "system.js", "mistral.js", "mistral-status.cjs", "mod.json"]) assert.ok(fs.existsSync(path.join(mod, f)), f);
   assert.ok(!fs.existsSync(path.join(mod, "jsconfig.json")), "files the app writes aren't copied");
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "layouts", "mine.json.bak-mcc-usage"), "utf8")), mainLike());
   assert.ok(pathTo(layout("mine"), "mcc-usage"));

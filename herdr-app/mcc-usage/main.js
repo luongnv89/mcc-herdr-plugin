@@ -3,7 +3,9 @@
 // every account up live (`mcc usage --all`). Between refreshes it rereads mcc's
 // cache (`mcc usage --json-v2`, a local file read) every 30 seconds while shown.
 // Above the accounts, a line with this machine's CPU, memory and network, sampled
-// every 5 seconds while shown.
+// every 5 seconds while shown. Under the accounts, a row with the Mistral Vibe
+// subscription (mistral-status.cjs, run with Node): read at start, on ↻ and every
+// 5 minutes while shown.
 //
 // It lives in a layout block (id "mcc-usage", or props.block) and sizes that
 // block to its rows with layout.resize. Key commands: mcc-usage.toggle, .show,
@@ -11,14 +13,18 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, home, theme, run, layout, props, nextCommand, readTextFile, window as appWindow } from "herdr";
+import { exec, home, appHome, theme, run, layout, props, nextCommand, readTextFile, window as appWindow } from "herdr";
 import { parse, firstError, notices, details, updatedLabel, blockHeight, SIZES, level, isStale, staleAge, unreadable, hasProblem } from "./usage.js";
 import { parseProcStat, cpuPercent, parseMeminfo, parseVmStat, parseIostat, netDevNames, parseNetDev, parseNetstat, rate, step, formatPair, formatRate, shortBytes, memPercent, readout, label, statsTip } from "./system.js";
+import { parseStatus, failedStatus, mistralView, mistralTip } from "./mistral.js";
 
 const POLL = 30000;
 // The machine's stats change by the second, so they're sampled more often than usage,
 // and no command that reads them may run into the next sample.
 const STATS = 5000, STATS_TIMEOUT = 4000;
+// Each Mistral read starts Vibe's app server (about 2 s), so it's never on the 30 s
+// poll. The helper stops itself at 20 s.
+const MISTRAL = 300000, MISTRAL_TIMEOUT = 25000;
 // The sidebar's rail (collapsed to icons) is narrower than this, as the built-in
 // sections (agents, workspace-chrome) have it.
 const RAIL = 160;
@@ -52,9 +58,12 @@ export default class Usage extends View {
     this.netBase = null;   // the last byte counters, for the next network rate
     this.virtual = new Map(); // interface name → whether Linux lists it as virtual
     this.epoch = 0;        // bumped on hide and show, so a sample that was running then is dropped
+    this.mistral = null;   // what mistral-status.cjs said (parseStatus), null until it has
+    this.node = null;      // the Node that ran it
 
     cx.timer.every(POLL, (cx) => { if (!this.hidden) this.load(cx); });
     cx.timer.every(STATS, (cx) => { if (!this.hidden) this.sample(cx); });
+    cx.timer.every(MISTRAL, (cx) => { if (!this.hidden) this.fetchMistral(cx); });
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
@@ -64,7 +73,7 @@ export default class Usage extends View {
         else if (c === "refresh") this.refresh(cx);
       }
     });
-    if (!this.hidden) { this.load(cx); this.sample(cx); }
+    if (!this.hidden) { this.load(cx); this.sample(cx); this.fetchMistral(cx); }
     else this.fit();
   }
 
@@ -81,6 +90,35 @@ export default class Usage extends View {
       } catch (e) { last = e; }
     }
     throw new Error(this.bin ? `can't run ${this.bin}: ${last}` : "mcc not found: install it or put it on your PATH");
+  }
+
+  // Runs the Mistral helper this mod ships with Node: from PATH, else where Node's
+  // installers put it. Remembers which one worked.
+  async mistralStatus() {
+    const h = home(), script = `${appHome()}/mods/mcc-usage/mistral-status.cjs`;
+    const tries = this.node ? [this.node] : ["node", `${h}/.local/bin/node`, "/opt/homebrew/bin/node", "/usr/local/bin/node"];
+    for (const bin of tries) {
+      try {
+        const r = await exec(bin, [script], { timeout: MISTRAL_TIMEOUT });
+        this.node = bin;
+        return r;
+      } catch {}
+    }
+    throw new Error("node not found: the Mistral row needs Node on your PATH");
+  }
+
+  // The Mistral Vibe status, one read at a time. A failure shows on the row only.
+  fetchMistral(cx) {
+    if (this.mistralBusy) return;
+    this.mistralBusy = true;
+    cx.spawn(async (cx) => {
+      try {
+        const r = await this.mistralStatus();
+        this.mistral = r.code === 0 ? parseStatus(r.stdout) : failedStatus(r.stderr);
+      } catch (e) { this.mistral = { found: true, status: null, error: e.message ?? String(e) }; }
+      this.mistralBusy = false;
+      cx.notify();
+    });
   }
 
   load(cx) {
@@ -108,6 +146,7 @@ export default class Usage extends View {
   refresh(cx) {
     if (this.refreshing) return;
     this.refreshing = true;
+    this.fetchMistral(cx);
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -134,7 +173,7 @@ export default class Usage extends View {
     this.stats = {};
     this.cpuBase = this.netBase = null;
     this.epoch++;
-    if (!this.hidden) { this.load(cx); this.sample(cx); }
+    if (!this.hidden) { this.load(cx); this.sample(cx); if (!this.mistral) this.fetchMistral(cx); }
     this.fit();
     cx.notify();
   }
@@ -228,7 +267,7 @@ export default class Usage extends View {
   // Fit the block to what it shows. Never from render(): a resize re-renders.
   fit() {
     // The stats lines show whenever the values do, read or not, so sampling never resizes.
-    const want = blockHeight({ hidden: this.hidden, rows: this.profiles.length, notices: this.lines().length, rail: this.narrow(), stats: !this.hidden });
+    const want = blockHeight({ hidden: this.hidden, rows: this.profiles.length, notices: this.lines().length, rail: this.narrow(), stats: !this.hidden, mistral: !this.hidden });
     const node = find(layout(), this.block);
     if (!node || node.size?.px === want) return;
     run("layout.resize", { id: this.block, px: want });
@@ -262,8 +301,8 @@ export default class Usage extends View {
     return l === "high" ? t.ansi1 : l === "warn" ? t.ansi3 : t.ansi2;
   }
 
-  // A small bar and the percent. Stale numbers show faded.
-  meter(t, w, stale) {
+  // A small bar and the percent (or `text`). Stale numbers show faded.
+  meter(t, w, stale, text) {
     if (!w) {
       return h_flex().w(METER).flex_none().gap(5).items_center()
         .child(div().w(BAR).h(4).rounded(2).bg(t.border))
@@ -273,7 +312,21 @@ export default class Usage extends View {
     const fill = Math.max(0, Math.min(BAR, Math.round((pct / 100) * BAR)));
     return h_flex().w(METER).flex_none().gap(5).items_center().when(stale, (el) => el.opacity(FADED))
       .child(div().w(BAR).h(4).rounded(2).bg(t.border).overflow_hidden().child(div().w(fill).h(4).bg(color)))
-      .child(div().w(PCT).text_right().text_size(11.5).text_color(color).child(`${pct}%`));
+      .child(div().w(PCT).text_right().text_size(11.5).text_color(color).child(text ?? `${pct}%`));
+  }
+
+  // The Mistral row: the plan, when the month resets (in the 5h column) and the
+  // month's usage (in the week column); else why there's nothing to show.
+  mistralRow(t, now) {
+    const v = mistralView(this.mistral, now);
+    const color = v.kind === "error" ? t.ansi1 : v.kind === "none" ? t.ansi3 : t.dim;
+    return h_flex().id("mu-mistral").h(SIZES.mistral).px(8).flex_none().gap(6).items_center().rounded(6)
+      .hover((s) => s.bg(t.hover)).tooltip(mistralTip(this.mistral, now))
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(v.name))
+      .when(v.kind === "ok", (el) => el
+        .child(div().w(METER).flex_none().text_right().text_size(10.5).text_color(t.dim).truncate().child(v.note || v.reset))
+        .child(this.meter(t, { percent: Math.min(100, v.pct) }, false, v.label)))
+      .when(v.kind !== "ok", (el) => el.child(div().w(METER * 2 + 6).flex_none().text_right().text_size(11).text_color(color).truncate().child(v.short)));
   }
 
   row(t, p, now) {
@@ -339,6 +392,16 @@ export default class Usage extends View {
         .child(w ? `${Math.round(w.percent)}%` : "—"));
   }
 
+  // The Mistral line on the rail: V and the month's percent, or n/a.
+  railMistral(t, now) {
+    const v = mistralView(this.mistral, now);
+    return h_flex().id("mu-rail-mistral").h(SIZES.railStat).flex_none().gap(2).items_center().justify_center()
+      .text_size(10.5).tooltip(mistralTip(this.mistral, now))
+      .child(div().flex_none().text_color(t.dim).child("V"))
+      .child(div().min_w(0).truncate().text_color(v.kind === "ok" ? this.tone(t, Math.round(v.pct)) : t.dim)
+        .child(v.kind === "ok" ? v.label : v.kind === "loading" ? "—" : "n/a"));
+  }
+
   render(cx) {
     const t = theme(), now = Date.now();
     const rail = this.narrow();
@@ -358,7 +421,8 @@ export default class Usage extends View {
       return root.pt(8).child(h_flex().h(24).flex_none().items_center().justify_center().child(this.eye(t)))
         .when(!this.hidden, (el) => el.child(v_flex().id("mu-rail").flex_1().min_h(0).overflow_y_scrollbar()
           .children(this.railStats(t))
-          .children(this.profiles.map((p) => this.railRow(t, p, now)))));
+          .children(this.profiles.map((p) => this.railRow(t, p, now)))
+          .child(this.railMistral(t, now))));
     }
 
     const placeholder = !this.loaded ? "Loading…" : !this.profiles.length && !this.error ? "No mcc profiles" : null;
@@ -371,6 +435,7 @@ export default class Usage extends View {
           .child(div().w(METER).flex_none().text_right().child("week")))
         .when(Boolean(placeholder), (el) => el.child(div().h(24).px(8).flex_none().flex().items_center().text_color(t.dim).child(placeholder)))
         .children(this.profiles.map((p) => this.row(t, p, now)))
+        .child(this.mistralRow(t, now))
         .children(this.lines().map((n, i) => div().id(`mu-note-${i}`).h(18).px(8).flex_none().flex().items_center()
           .text_size(11).text_color(n.error ? t.ansi1 : t.ansi3).tooltip(n.text).child(div().min_w(0).truncate().child(n.text))))));
   }
