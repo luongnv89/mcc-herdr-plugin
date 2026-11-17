@@ -116,12 +116,13 @@ export function updatedLabel(profiles, lastLive, now = Date.now()) {
 
 // The block's height in px (at zoom 1). The section draws a header, then, when its
 // values show, the machine's stats line (with `stats`), a column-label line, one line
-// per account (or one for loading / empty), the notice lines and some room at the
-// bottom. On the rail it draws only the eye button and, when its values show, three
-// stats lines (with `stats`) and one line per account, with railPad above and below.
-export const SIZES = { header: 41, stats: 20, labels: 20, row: 24, notice: 18, bottom: 10, railPad: 8, railStat: 20 };
-export function blockHeight({ hidden, rows, notices: lines = 0, rail = false, stats = false }) {
-  if (rail) return 2 * SIZES.railPad + SIZES.row + (hidden ? 0 : rows * SIZES.row + (stats ? 3 * SIZES.railStat : 0));
+// per account (or one for loading / empty), the Mistral row (with `mistral`), the
+// notice lines and some room at the bottom. On the rail it draws only the eye button
+// and, when its values show, three stats lines (with `stats`), one line per account
+// and a Mistral line (with `mistral`), with railPad above and below.
+export const SIZES = { header: 41, stats: 20, labels: 20, row: 24, mistral: 24, notice: 18, bottom: 10, railPad: 8, railStat: 20 };
+export function blockHeight({ hidden, rows, notices: lines = 0, rail = false, stats = false, mistral = false }) {
+  if (rail) return 2 * SIZES.railPad + SIZES.row + (hidden ? 0 : rows * SIZES.row + (stats ? 3 * SIZES.railStat : 0) + (mistral ? SIZES.railStat : 0));
   if (hidden) return SIZES.header;
-  return SIZES.header + (stats ? SIZES.stats : 0) + SIZES.labels + Math.max(1, rows) * SIZES.row + lines * SIZES.notice + SIZES.bottom;
+  return SIZES.header + (stats ? SIZES.stats : 0) + SIZES.labels + Math.max(1, rows) * SIZES.row + (mistral ? SIZES.mistral : 0) + lines * SIZES.notice + SIZES.bottom;
 }
