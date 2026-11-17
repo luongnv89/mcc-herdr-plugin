@@ -3,7 +3,8 @@
 // `mcc usage --json-v2`. It sits at the bottom-left of the tab, under the sidebar's
 // agent list. Refresh looks every account up live (`mcc usage --all`); collapse
 // shrinks the pane so the panes above get the room back. A line under the title
-// shows this machine's CPU, memory and network, sampled every 5 seconds.
+// shows this machine's CPU, memory and network, sampled every 5 seconds. A row under
+// the accounts shows the Mistral Vibe subscription: its plan and the month's usage.
 "use strict";
 const { execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -27,6 +28,11 @@ const STALE = 3600000;
 // and no command that reads them may run into the next sample.
 const STATS = 5000;
 const STATS_TIMEOUT = 4000;
+// The Mistral Vibe status: each read starts Vibe's app server, so it's read at start,
+// on refresh and every 5 minutes, never on the 30 s poll. The helper stops itself at 20 s.
+const MISTRAL = 300000;
+const MISTRAL_TIMEOUT = 25000;
+const MISTRAL_HELPER = path.join(__dirname, "herdr-app", "mcc-usage", "mistral-status.cjs");
 
 // ── Terminal ────────────────────────────────────────────────────────────────
 
@@ -338,6 +344,81 @@ async function sampleStats() {
   draw();
 }
 
+// ── Mistral ─────────────────────────────────────────────────────────────────
+// Ported from herdr-app/mcc-usage/mistral.js: keep the two copies the same (the
+// tests check they agree). It uses this file's clean() and until(), which are
+// the same as mistral.js's.
+
+const MISTRAL_STATUSES = ["ready", "missing_key", "unauthorized", "unavailable"];
+const PLAN_KINDS = { api: "API", chat: "Le Chat", mistral_code: "Mistral Code" };
+
+// A short string the helper passed on, cleaned, or null.
+const mistralText = (v) => (typeof v === "string" && clean(v) ? clean(v).slice(0, 40) : null);
+
+// The helper's stdout → { found, status, plan, budget, error }, whitelisted again:
+// only these fields, each of the type it should be.
+function parseStatus(stdout) {
+  let o;
+  try { o = JSON.parse(String(stdout ?? "").trim().split("\n").at(-1)); } catch { o = null; }
+  if (!o || typeof o !== "object") return { found: true, status: null, error: "no answer from mistral-status" };
+  if (o.found === false) return { found: false };
+  const p = o.plan && typeof o.plan === "object" ? o.plan : null;
+  const b = o.budget && typeof o.budget === "object" ? o.budget : null;
+  const pct = typeof b?.usagePercentage === "number" ? b.usagePercentage : NaN;
+  return {
+    found: true,
+    status: MISTRAL_STATUSES.includes(o.status) ? o.status : null,
+    plan: p ? { kind: mistralText(p.kind), name: mistralText(p.name), title: mistralText(p.title) } : null,
+    budget: b && Number.isFinite(pct) ? { usagePercentage: pct, resetAt: mistralText(b.resetAt), paygEnabled: b.paygEnabled === true } : null,
+    error: mistralText(o.error) ?? (MISTRAL_STATUSES.includes(o.status) ? null : "no answer from mistral-status"),
+  };
+}
+
+// The status when the helper itself failed (exited non-zero): Node couldn't find it, or it broke.
+const failedStatus = (stderr) => ({ found: true, status: null, error: /Cannot find module/.test(String(stderr ?? "")) ? "helper missing: reinstall the plugin" : "mistral-status failed" });
+
+// The plan's name: its title (Pro), else its name, else what kind it is.
+function planLabel(plan) {
+  if (!plan) return null;
+  const name = mistralText(plan.name);
+  return mistralText(plan.title) ?? (name ? name[0] + name.slice(1).toLowerCase() : null) ?? PLAN_KINDS[plan.kind] ?? null;
+}
+
+// Vibe's usage is a percent of the month's allowance: 0.6%, 12%, 140%.
+const pctText = (pct) => (pct < 9.95 ? `${(Math.round(pct * 10) / 10).toFixed(1)}%` : `${Math.round(pct)}%`);
+// mcc's thresholds: 80% and 95%.
+const mistralLevel = (pct) => (pct >= 95 ? "high" : pct >= 80 ? "warn" : "ok");
+
+// What the row shows. `kind` is "loading", "ok" (the plan and a percent), "none"
+// (no subscription to show: not found, not logged in, no usage), or "error".
+// `text` is the whole line, `short` what fits beside the name.
+function mistralView(s, now = Date.now()) {
+  if (!s) return { kind: "loading", name: "Mistral", short: "…", text: "Mistral: loading…" };
+  if (!s.found) return { kind: "none", name: "Mistral", short: "not found", text: "Mistral Vibe not found: install it or set VIBE_APP_SERVER_BIN" };
+  if (!s.status) return { kind: "error", name: "Mistral", short: "error", text: `Mistral: ${s.error || "no answer"}` };
+  if (s.status === "missing_key") return { kind: "none", name: "Mistral", short: "not logged in", text: "Mistral: not logged in · run vibe" };
+  if (s.status === "unauthorized") return { kind: "none", name: "Mistral", short: "login rejected", text: "Mistral: login rejected · run vibe" };
+  if (s.status === "unavailable") return { kind: "none", name: "Mistral", short: "unavailable", text: "Mistral: account unavailable" };
+  const plan = planLabel(s.plan);
+  const name = plan ? `Mistral ${plan}` : "Mistral";
+  if (!s.budget) return { kind: "none", name, short: "usage unavailable", text: `${name}: usage unavailable` };
+  const pct = s.budget.usagePercentage;
+  const note = pct > 100 ? (s.budget.paygEnabled ? "pay-as-you-go" : "over the limit") : "";
+  const reset = until(s.budget.resetAt, now);
+  const text = `${name}: ${pctText(pct)}${note ? ` ${note}` : ""}${reset ? ` · resets in ${reset}` : ""}`;
+  return { kind: "ok", name, pct, label: pctText(pct), level: mistralLevel(pct), note, reset, short: pctText(pct), text };
+}
+
+// The row's tooltip: the plan, the month's usage and when it resets.
+function mistralTip(s, now = Date.now()) {
+  const v = mistralView(s, now);
+  if (v.kind !== "ok") return v.text;
+  const lines = [`${v.name} (Mistral Vibe)`, `This month: ${v.label} of the allowance${v.note ? `, ${v.note}` : ""}`];
+  if (v.reset) lines.push(`Resets in ${v.reset}`);
+  lines.push(`Pay-as-you-go: ${s.budget.paygEnabled ? "on" : "off"}`);
+  return lines.join("\n");
+}
+
 // ── Time ────────────────────────────────────────────────────────────────────
 
 // Time until `iso`: 42m, 3h05, 5d3h.
@@ -442,6 +523,30 @@ function statsRow(cols, s = ui.stats) {
   return clip(" " + parts.map(([k, v, c]) => dim(k) + c(v)).join(dim(" · ")), cols);
 }
 
+// The Mistral row: " Mistral Pro  ██░░░░ 0.6%  13d5h". When that doesn't fit it
+// narrows the bar, drops the countdown, then the bar, then cuts. Without usage to
+// show, it says why: not found, not logged in, unavailable, an error.
+function mistralRow(cols, s = ui.mistral, now = Date.now()) {
+  const v = mistralView(s, now);
+  if (v.kind !== "ok") {
+    const color = v.kind === "error" ? red : v.kind === "loading" ? dim : yellow;
+    return clip(" " + color(fit(v.text, cols - 1)), cols);
+  }
+  const pct = Math.round(v.pct), c = tone(pct);
+  const note = v.note ? " " + v.note : "";
+  const build = (bw, reset) => {
+    const text = (bw ? bar(Math.min(100, v.pct), bw) + " " : "") + c(v.label + note) + (reset && v.reset ? " " + dim(v.reset) : "");
+    return { plain: (bw ? bw + 1 : 0) + width(v.label + note) + (reset && v.reset ? 1 + width(v.reset) : 0), text };
+  };
+  const name = width(v.name) + 3;
+  for (const [bw, reset] of [[12, true], [6, true], [0, true], [0, false]]) {
+    const r = build(bw, reset);
+    if (name + r.plain <= cols) return ` ${v.name}  ${r.text}`;
+  }
+  const r = build(0, false);
+  return clip(` ${fit(v.name, Math.max(1, cols - r.plain - 3))}  ${r.text}`, cols);
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 const ui = {
@@ -460,6 +565,8 @@ const ui = {
   cpuBase: null,     // the last CPU times and byte counters, for the next percent and rate
   netBase: null,
   sampling: false,
+  mistral: null,     // what mistral-status.cjs said (parseStatus), null until it has
+  mistralBusy: false,
 };
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 let mcc = null;
@@ -487,6 +594,7 @@ async function load() {
 // it couldn't reach; those get a ⚠ and a line saying why.
 async function refresh() {
   if (ui.refreshing) return;
+  fetchMistral();
   if (!mcc) mcc = findMcc();
   if (!mcc) return load();
   ui.refreshing = true;
@@ -504,6 +612,21 @@ async function refresh() {
   }
   ui.refreshing = false;
   await load();
+}
+
+// Ask mistral-status.cjs for the Mistral Vibe status, one read at a time. A
+// missing helper or one that fails shows on the row; nothing else changes.
+async function fetchMistral() {
+  if (ui.mistralBusy) return;
+  ui.mistralBusy = true;
+  if (!fs.existsSync(MISTRAL_HELPER)) ui.mistral = { found: true, status: null, error: "helper missing: reinstall the plugin" };
+  else {
+    const r = await run(process.execPath, [MISTRAL_HELPER], MISTRAL_TIMEOUT);
+    if (r.error) ui.mistral = { found: true, status: null, error: r.error.killed ? "mistral-status timed out" : "can't run node" };
+    else ui.mistral = r.code === 0 ? parseStatus(r.stdout) : failedStatus(r.stderr);
+  }
+  ui.mistralBusy = false;
+  draw();
 }
 
 function saveCollapsed() {
@@ -531,10 +654,10 @@ function resizeStep(have, want, span) {
 
 // The rows the panel's content wants: header only when collapsed (Herdr keeps a
 // pane at least a tenth of its split, so a few rows still show), else everything:
-// header, stats line, rule, rows, notices and footer.
+// header, stats line, rule, rows, the Mistral row, notices and footer.
 function wantedRows() {
   if (ui.collapsed) return 1;
-  return 3 + Math.max(1, ui.profiles.length) + noticeLines().length + 1;
+  return 3 + Math.max(1, ui.profiles.length) + 1 + noticeLines().length + 1;
 }
 
 function snapshotRect() {
@@ -642,6 +765,7 @@ function draw() {
   if (!ui.loaded) body.push(dim(" Loading…"));
   else if (!ui.profiles.length && !ui.error) body.push(dim(" No mcc profiles"));
   for (const p of ui.profiles) body.push(row(p, layout, ui.issues[p.name], now));
+  if (!ui.collapsed) body.push(mistralRow(cols, ui.mistral, now));
   if (!ui.collapsed) for (const n of notices) body.push(" " + n.color(fit(n.text, cols - 2)));
   else if (ui.error) body.unshift(" " + red(fit(ui.error, cols - 2)));
 
@@ -719,9 +843,11 @@ function main() {
   setInterval(() => { if (!ui.refreshing) load(); }, POLL);
   // Sampled while collapsed too: the title line shows CPU and memory then.
   setInterval(sampleStats, STATS);
+  setInterval(fetchMistral, MISTRAL);
 
   draw();
   sampleStats();
+  fetchMistral();
   load().then(resize).then(draw);
 }
 
@@ -730,4 +856,5 @@ else module.exports = {
   width, fit, clip, until, ago, flag, parse, firstError, columns, row, cell, cellWidthFor, peak, parentSplit, resizeStep, reasonText, findMcc, noticeLines, wantedRows, ui,
   parseProcStat, cpuPercent, parseMeminfo, parseVmStat, parseNetDev, parseNetstat, rate, step, formatBytes, formatRate, shortBytes, formatPair, memPercent, readout, label,
   cpuTimes, readStats, applyStats, resetStats, statsRow, header,
+  parseStatus, failedStatus, planLabel, pctText, mistralLevel, mistralView, mistralTip, mistralRow, fetchMistral, MISTRAL_HELPER,
 };
